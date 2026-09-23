@@ -191,9 +191,14 @@ Aim: Weaver installs on other machines without help and holds up on repositories
 
 ## Next work items, functional first
 
-1. AI explanations: on/off per project, bring-your-own key, one shared guide for every provider.
-2. SVF and GCC evidence side by side in the interface.
-3. The simplification checker with target profiles.
-4. The risk view and risk report.
-5. The output-parameter recipe.
-6. Several projects per server; `weaver doctor` and the container image.
+Done:
+
+- AI explanations: on/off per project, bring-your-own key, one shared guide for every provider.
+- SVF and GCC evidence side by side in the interface.
+- The simplification checker with target profiles (`weaver simplify`, the Simplify tab).
+
+Next:
+
+1. The risk view and risk report.
+2. The output-parameter recipe.
+3. Several projects per server; `weaver doctor` and the container image.

@@ -605,13 +605,14 @@ def _merge_function(functions: dict[str, Any], key: str, summ: dict[str, Any], u
     cur["units"].append(unit)
     if profile not in cur["profiles"]:
         cur["profiles"].append(profile)
-    for field in ("calls", "indirect_calls", "named_writes", "pointer_writes", "function_refs", "asm"):
-        seen = {json.dumps(x, sort_keys=True) for x in cur[field]}
+    for field in ("calls", "indirect_calls", "named_writes", "pointer_writes", "function_refs", "asm", "constructs"):
+        items = cur.setdefault(field, [])
+        seen = {json.dumps(x, sort_keys=True) for x in items}
         for x in summ.get(field, []):
             k = json.dumps(x, sort_keys=True)
             if k not in seen:
                 seen.add(k)
-                cur[field].append(x)
+                items.append(x)
 
 
 def _weakest(statuses: list[str]) -> str:

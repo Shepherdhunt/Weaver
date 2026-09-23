@@ -58,6 +58,8 @@ def snapshot_dataset(
     plist = get("pointers")
     get("map")
     get("settings")
+    for prof in (get("simplify") or {}).get("profiles", []):
+        get("simplify", {"profile": prof["id"]})
     ids = [p["id"] for p in plist["pointers"]]
     say(f"{len(ids)} pointer(s) in scope")
     for fid in ids:

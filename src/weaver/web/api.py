@@ -31,6 +31,7 @@ class Cache:
         self.verdicts: dict[str, Any] = {}
         self.inv: dict[str, Any] | None = None
         self.ctx: Any = None  # the RecipeContext of the cached evaluation (flow evidence loaded once)
+        self.simplify: dict[str, Any] = {}  # profile -> simplification report for the cached inventory
         # Path prefixes the views show (large projects: a subsystem at a time).  Recipes still see the
         # whole program; only findings under these prefixes are evaluated and listed.
         self.scope = scope or []
@@ -61,7 +62,7 @@ class Cache:
                         "edits": len(res.edits),
                         "preconditions": [p.to_json() for p in res.preconditions],
                     }
-            self.key, self.verdicts, self.inv = key, verdicts, inv
+            self.key, self.verdicts, self.inv, self.simplify = key, verdicts, inv, {}
         assert self.inv is not None
         return self.inv, self.verdicts
 
@@ -269,6 +270,17 @@ def _call_arguments(project: Project, inv: dict[str, Any], f: dict[str, Any]) ->
             )
     out.sort(key=lambda x: (x["file"] or "", x["line"] or 0))
     return out
+
+
+def simplify_view(project: Project, cache: Cache, profile: str | None = None) -> dict[str, Any]:
+    """The simplification report for one target profile, limited to the view's scope."""
+    from weaver.simplify import check
+
+    inv, _ = cache.get(project)
+    key = profile or ""
+    if key not in cache.simplify:
+        cache.simplify[key] = check(project, inv, profile, cache.in_scope)
+    return cache.simplify[key]
 
 
 def _combine_gcc(answers: list[tuple[str, str]]) -> dict[str, str]:

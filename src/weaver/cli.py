@@ -564,6 +564,41 @@ def cmd_ai(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_simplify(args: argparse.Namespace) -> int:
+    """Which constructs stand between each function and a target profile (CLite or a simplification goal)."""
+    from weaver.analysis.inventory import load_inventory
+    from weaver.simplify import check
+
+    proj = _project(args)
+    scope = args.scope or []
+    rep = check(proj, load_inventory(proj), args.profile, lambda f: not scope or any(f.startswith(s) for s in scope))
+    if args.json:
+        _print_json(rep)
+        return 0
+    p, sm = rep["profile"], rep["summary"]
+    print(f"Profile: {p['title']} ({p['id']}){' — provisional' if p['provisional'] else ''}")
+    for n in rep["notes"]:
+        print(f"  note: {n}")
+    print(f"{sm['ready']} of {sm['functions']} function(s) meet it ({sm['percent']}%)")
+    print("\nBy rule (functions / sites):")
+    for r, c in sorted(sm["by_rule"].items(), key=lambda kv: -kv[1]["functions"]):
+        print(f"  {c['functions']:>6} / {c['sites']:<6} {r:<22} {rep['rules'][r]['title']}")
+    rows = [r for r in rep["functions"] if r["violations"]]
+    if args.function:
+        rows = [r for r in rows if r["function"] == args.function]
+        for r in rows:
+            print(f"\n{r['file']}:{r['line']} {r['function']}()")
+            for v in r["violations"]:
+                print(f"  line {v['line']}: {v['rule']}: {v['text']}")
+        return 0
+    if rows:
+        print(f"\nMost constructs to remove (first {min(args.top, len(rows))} of {len(rows)}):")
+        for r in rows[: args.top]:
+            counts = ", ".join(f"{k} {n}" for k, n in sorted(r["counts"].items(), key=lambda kv: -kv[1]))
+            print(f"  {len(r['violations']):>4}  {r['file']}:{r['line']} {r['function']}()  [{counts}]")
+    return 0
+
+
 def cmd_auto(args: argparse.Namespace) -> int:
     from weaver.ledger import Ledger
     from weaver.pipeline import refresh
@@ -978,6 +1013,13 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--fragment", action="store_true", help="leave out <html>, <head> and <body> (the host adds them)")
     sp.add_argument("--repo", help="git URL the page's run-it-locally steps clone")
     sp.add_argument("--branch", help="branch the page's run-it-locally steps check out")
+
+    sp = add("simplify", cmd_simplify, "constructs standing between each function and a target (CLite or a goal)")
+    sp.add_argument("--profile", help="clite-provisional, pointer-free, modular, or a profile from weaver.yaml")
+    sp.add_argument("--scope", action="append", help="only functions under this path prefix (repeatable)")
+    sp.add_argument("--function", help="list one function's constructs with their lines")
+    sp.add_argument("--top", type=int, default=20, help="functions to list (default 20)")
+    sp.add_argument("--json", action="store_true")
 
     sp = add("ai", cmd_ai, "AI explanations: status, enable/disable, provider, your API key, the guide")
     sp.add_argument("action", nargs="?", default="status", choices=["status", "enable", "disable", "key", "guide"])

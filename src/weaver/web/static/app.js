@@ -438,7 +438,7 @@ function renderWorkspace() {
 }
 
 const VIEWS = [
-  ["map", "Map"], ["graph", "Graph"], ["source", "Source"], ["changes", "Changes"], ["ledger", "Transactions"],
+  ["map", "Map"], ["graph", "Graph"], ["source", "Source"], ["simplify", "Simplify"], ["changes", "Changes"], ["ledger", "Transactions"],
 ];
 
 function renderTabs() {
@@ -534,7 +534,7 @@ function renderView() {
       "show what they do and how to run them locally.");
     v.append(note);
   }
-  ({ map: renderMap, graph: renderGraph, source: renderSource, changes: renderChanges, ledger: renderLedger })[S.view](v);
+  ({ map: renderMap, graph: renderGraph, source: renderSource, simplify: renderSimplify, changes: renderChanges, ledger: renderLedger })[S.view](v);
 }
 
 // ---------------------------------------------------------------- map view
@@ -852,10 +852,13 @@ function pointsToTable(r, isParam) {
     if (!b) return h("td", { class: "d-sub", text: "not selected" });
     if (!Array.isArray(b.targets)) return h("td", { class: "d-sub", text: b.note || b.status });
     if (!b.targets.length) return h("td", { class: "d-sub", text: "nothing in the analysed program" });
+    const unknown = (o) => ["dummy", "blackhole", "unknown"].includes(o.kind);
     return h("td", {}, h("div", { class: "targets" }, b.targets.map((o) => h("span", {
-      class: "tchip" + (o.kind === "gcc-special" ? " special" : " svf"),
-      title: o.kind === "gcc-special" ? (GCC_SPECIAL[o.name.replace(/\(.*/, "")] || o.name) : `${o.kind || "object"}${o.file ? " at " + o.file + ":" + o.line : ""}`,
-      text: o.name || `#${o.id}` }))), b.status === "incomplete" ? h("div", { class: "d-sub", text: "incomplete run" }) : null);
+      class: "tchip" + (o.kind === "gcc-special" || unknown(o) ? " special" : " svf"),
+      title: o.kind === "gcc-special" ? (GCC_SPECIAL[o.name.replace(/\(.*/, "")] || o.name)
+        : unknown(o) ? "memory SVF cannot identify (for example an address computed from an integer); never evidence of safety"
+        : `${o.kind || "object"}${o.file ? " at " + o.file + ":" + o.line : ""}`,
+      text: unknown(o) ? "unknown memory" : o.name || `#${o.id}` }))), b.status === "incomplete" ? h("div", { class: "d-sub", text: "incomplete run" }) : null);
   };
   const writeCell = (b) => {
     const w = b && b.writes;
@@ -906,10 +909,10 @@ function renderDetail() {
       h("a", { href: "#", onclick: (e) => { e.preventDefault(); gotoLine(f.file, f.line); } }, `${f.file}:${f.line}`),
       f.function ? ` · in ${f.function}()` : "", ` · evidence ${f.evidence_status}`,
       f.typedef_hidden ? " · hidden behind a typedef" : ""),
-    aiOn() ? h("div", { class: "d-ai" }, h("button", { class: "btn small", onclick: () => explain(f.id),
-      title: `Ask ${S.state.ai.provider} (${S.state.ai.model || "model not set"}) to explain this pointer. ` +
-        "It receives this pointer's evidence and nearby source; it never edits." }, "Explain with AI")) : null,
   );
+  if (aiOn()) box.append(h("div", { class: "d-ai" }, h("button", { class: "btn small", onclick: () => explain(f.id),
+    title: `Ask ${S.state.ai.provider} (${S.state.ai.model || "model not set"}) to explain this pointer. ` +
+      "It receives this pointer's evidence and nearby source; it never edits." }, "Explain with AI")));
 
   // recipes
   const recs = Object.entries(d.recipes);
@@ -1075,6 +1078,66 @@ async function explain(fid) {
     const job = await api("explain", { finding: fid });
     followJob(job, (res) => modal("AI explanation (advisory)", [h("pre", { class: "diff", style: { whiteSpace: "pre-wrap" }, text: (res && res.text) || "" })], (close) => [h("button", { class: "btn", onclick: close }, "Close")]));
   } catch (e) { fail(e); }
+}
+
+// ---------------------------------------------------------------- simplify view
+// Which constructs stand between each function and the chosen target (CLite, or a simplification goal).
+async function renderSimplify(v) {
+  let rep;
+  try { rep = await api(S.simplify && S.simplify.profile ? "simplify?profile=" + encodeURIComponent(S.simplify.profile) : "simplify"); }
+  catch (e) { return fail(e); }
+  const st = S.simplify = { profile: rep.profile.id, rule: null, q: "", all: false, open: new Set(), ...(S.simplify || {}) };
+  st.profile = rep.profile.id;
+  const sm = rep.summary;
+  const pad = h("div", { class: "pad simp" });
+  v.append(pad);
+  const draw = () => {
+    clear(pad);
+    const sel = h("select", { id: "simp-profile", "aria-label": "Target profile", onchange: (e) => { S.simplify = { profile: e.target.value }; renderView(); } },
+      rep.profiles.map((p) => h("option", { value: p.id, selected: p.id === rep.profile.id, text: p.title })));
+    const search = h("input", { type: "search", id: "simp-q", value: st.q, placeholder: "Filter by function or file…", "aria-label": "Filter functions",
+      oninput: (e) => { st.q = e.target.value; drawRows(); } });
+    pad.append(...[
+      h("div", { class: "simp-head" }, h("label", { for: "simp-profile", text: "Target" }), sel,
+        h("div", { class: "progress", title: "functions with none of the profile's constructs" },
+          `${sm.ready} of ${sm.functions} functions meet it`, h("div", { class: "bar" }, h("i", { style: { width: sm.percent + "%" } })), `${sm.percent}%`)),
+      rep.profile.provisional ? null : rep.profile.note ? h("p", { class: "d-sub", text: rep.profile.note }) : null,
+      ...rep.notes.map((n) => h("div", { class: "banner", text: n })),
+      h("p", { class: "d-sub", text: "A guide for the manual work, not a certification. Code no analysed configuration compiled is not checked. " +
+        "Open a function to see each construct and its line." }),
+      h("div", { class: "filters simp-rules" }, Object.entries(sm.by_rule).sort((a, b) => b[1].functions - a[1].functions).map(([r, c]) =>
+        h("button", { class: "filter" + (st.rule === r ? " on" : ""), disabled: !c.functions, title: `${rep.rules[r].why} (${c.sites} site(s))`,
+          onclick: () => { st.rule = st.rule === r ? null : r; draw(); } }, `${rep.rules[r].title} · ${c.functions}`))),
+      h("div", { class: "simp-tools" }, search),
+      h("div", { class: "table-wrap", id: "simp-rows" })].filter(Boolean));
+    drawRows();
+  };
+  const drawRows = () => {
+    const box = clear(document.getElementById("simp-rows"));
+    const q = st.q.toLowerCase();
+    const rows = rep.functions.filter((r) => (!st.rule || r.counts[st.rule]) && (!q || `${r.function} ${r.file}`.toLowerCase().includes(q)));
+    const limit = st.all ? rows.length : 200;
+    const tbody = h("tbody", {});
+    for (const r of rows.slice(0, limit)) {
+      const key = `${r.file}::${r.function}`;
+      const open = st.open.has(key);
+      tbody.append(h("tr", { class: "click", tabindex: 0, "aria-expanded": open,
+        onclick: () => { open ? st.open.delete(key) : st.open.add(key); drawRows(); },
+        onkeydown: (e) => { if (e.key === "Enter") { open ? st.open.delete(key) : st.open.add(key); drawRows(); } } },
+        h("td", { class: "mono", text: r.function + "()" }), h("td", { class: "mono", text: `${r.file}:${r.line}` }),
+        h("td", {}, r.violations.length
+          ? Object.entries(r.counts).sort((a, b) => b[1] - a[1]).map(([k, n]) => h("span", { class: "tag", title: rep.rules[k].title, text: `${k} ${n}` }))
+          : h("span", { class: "tag ok", text: "meets the profile" }))));
+      if (open) tbody.append(h("tr", { class: "simp-detail" }, h("td", { colspan: 3 },
+        r.violations.length ? h("ul", {}, r.violations.map((x) => h("li", {},
+          h("a", { href: "#", onclick: (e) => { e.preventDefault(); gotoLine(r.file, x.line); } }, `line ${x.line}`),
+          ` · ${rep.rules[x.rule].title}: `, h("code", { text: x.text })))) : h("span", { class: "d-sub", text: "Nothing to remove for this target." }))));
+    }
+    box.append(h("table", { class: "table" }, h("thead", {}, h("tr", {}, ["Function", "Where", "Constructs to remove"].map((t) => h("th", { text: t })))), tbody));
+    if (rows.length > limit) box.append(h("button", { class: "btn small", onclick: () => { st.all = true; drawRows(); } }, `Show all ${rows.length}`));
+    if (!rows.length) box.append(h("div", { class: "d-sub", text: "No function matches." }));
+  };
+  draw();
 }
 
 // ---------------------------------------------------------------- ledger view
@@ -1305,7 +1368,7 @@ function runLocally() {
 
 function switchDataset(i) {
   Object.assign(S, { dataset: i, selected: null, detail: null, source: null, sourceFile: null, focusLine: null,
-    impact: null, view: "map", graphMode: "auto", map: null, pointers: [], removed: [] });
+    impact: null, view: "map", graphMode: "auto", map: null, pointers: [], removed: [], simplify: null });
   S.filters = { classes: new Set(), eligible: false, q: "", kinds: new Set() };
   try { localStorage.setItem("weaver-snapshot-dataset", snapData().id); } catch (e) { /* a convenience only */ }
   boot();

@@ -381,6 +381,8 @@ def route(app: App, method: str, path: str, q: dict[str, str], body: dict[str, A
         else:
             store_key(target.key_id, str(body.get("key") or ""))
         return {"ok": True, "key": key_status(target)}
+    if (method, head) == ("GET", "simplify"):
+        return api.simplify_view(proj, app.cache, q.get("profile") or None)
     if (method, head) == ("GET", "pointers"):
         return api.pointer_list(proj, app.cache)
     if (method, head) == ("GET", "pointer"):

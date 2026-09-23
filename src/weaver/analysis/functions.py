@@ -10,6 +10,7 @@ left to points-to evidence (``weaver.flow``).
 
 from __future__ import annotations
 
+import re
 from typing import Any
 
 from weaver.frontend.clang_ast import Loc, Node, TranslationUnit
@@ -19,6 +20,9 @@ from weaver.util import rel_or_abs
 WRITE_PARENTS = ("BinaryOperator", "CompoundAssignOperator", "UnaryOperator")
 SIDE_EFFECT_KINDS = {"CallExpr", "StmtExpr"}
 SIDE_EFFECT_OPS = {"=", "+=", "-=", "*=", "/=", "%=", "<<=", ">>=", "&=", "^=", "|=", "++", "--"}
+
+
+_UNION = re.compile(r"^(?:(?:const|volatile)\s+)*union\b")
 
 
 def _pos(loc: Loc, root: str) -> dict[str, Any] | None:
@@ -201,9 +205,33 @@ def summarize_function(fn: Node, tu: TranslationUnit, root: str) -> dict[str, An
     pointer_writes: list[dict[str, Any]] = []
     function_refs: list[dict[str, Any]] = []
     asm: list[dict[str, Any]] = []
+    # Constructs a simplification target may exclude (see weaver.simplify); pointer operations
+    # are recorded separately by the inventory.
+    constructs: list[dict[str, Any]] = []
+
+    def construct(kind: str, n: Node) -> None:
+        p = _pos(n.begin, root)
+        if p is not None:
+            constructs.append({"kind": kind, "line": p["line"], "col": p["col"]})
 
     for n in fn.walk():
         k = n.kind
+        if k in ("GotoStmt", "IndirectGotoStmt"):
+            construct("goto", n)
+        elif k == "VAArgExpr":
+            construct("varargs", n)
+        elif k in ("VarDecl", "ParmVarDecl") and n is not fn:
+            ct = n.canonical_type or ""
+            if k == "VarDecl" and n.storage_class == "static":
+                construct("static-local", n)
+            if "(*)" in ct:
+                construct("function-pointer", n)
+            if _UNION.match(ct):
+                construct("union", n)
+        elif k == "MemberExpr":
+            base = n.child(0)
+            if base is not None and _UNION.match(base.canonical_type or ""):
+                construct("union", n)
         if k == "CallExpr":
             cref = callee_ref(n)
             args = []
@@ -319,6 +347,10 @@ def summarize_function(fn: Node, tu: TranslationUnit, root: str) -> dict[str, An
         "pointer_writes": pointer_writes,
         "function_refs": function_refs,
         "asm": asm,
+        "constructs": sorted(
+            {(c["kind"], c["line"], c["col"]): c for c in constructs}.values(),
+            key=lambda c: (c["line"], c["col"], c["kind"]),
+        ),
     }
 
 

@@ -438,3 +438,16 @@ button.pill { cursor: pointer; font: inherit; background: none; }
 .tchip.special { border-style: dashed; color: var(--warn); }
 .verdict { display: inline-block; padding: 1px 7px; border-radius: 999px; font-size: 11.5px; font-weight: 600; border: 1px solid currentColor; }
 .verdict.no { color: var(--ok); } .verdict.yes { color: var(--bad); } .verdict.unknown { color: var(--warn); }
+
+/* simplification checker */
+.simp-head { display: flex; flex-wrap: wrap; align-items: center; gap: 10px 14px; margin-bottom: 8px; }
+.simp-head select, .simp-tools input { border: 1px solid var(--border); border-radius: 8px; padding: 5px 8px; background: var(--panel); max-width: 100%; }
+.simp-head .progress { margin-left: auto; }
+.simp-rules { margin: 8px 0; }
+.simp-tools { margin: 6px 0 8px; }
+.simp-tools input { width: min(360px, 100%); }
+.tag.ok { color: var(--ok); border-color: color-mix(in srgb, var(--ok) 50%, transparent); }
+.simp .tag { margin: 1px 4px 1px 0; }
+.simp-detail td { background: var(--panel-2); }
+.simp-detail ul { margin: 0; padding-left: 18px; font-size: 12.5px; }
+.table-wrap { overflow-x: auto; }

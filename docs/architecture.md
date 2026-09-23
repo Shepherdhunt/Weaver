@@ -133,6 +133,7 @@ Task ownership and scale make the interface recipes usable on multi-task program
 | `report.py` | tracker roadmap | `weaver report`: inventory and rejection report for a scope of the project. |
 | `flow/tasks.py` | tracker §5 | Task model: declared threads of control checked against thread starts and entry points, per-context write summaries, thread-escape analysis, and the concurrent-writer query behind `weaver tasks` and `SI.no-concurrent-writers`. |
 | `analysis/identindex.py` | tracker §§3, 9 | Identifier-to-files index for whole-tree textual reference scans, cached on disk by path, size and modification time. |
+| `simplify.py` | tracker roadmap | The simplification checker: rule catalogue, target profiles (CLite provisional, no pointers, modular redesign, project-defined), and each function's remaining constructs from the inventory's pointer operations, calls, writes and per-function AST constructs. |
 | `web/export.py` | — | `weaver export-ui`: records the interface's read-only answers (optionally for a scope) into one HTML page that needs no server. |
 | `testdetect.py`, `settings.py` | tracker §7 | Detecting a project's test commands (Make, CTest, Meson, scripts), and editing validation commands and the acceptance policy in `weaver.yaml` with a backup and reload check. |
 
@@ -320,6 +321,14 @@ They also get the same evidence slice and the same read-only tools. An answer mi
 flagged, and the transcript records the provider, model and guide version. The feature is off
 unless the project enables it. Keys stay in the environment or in a per-user file outside the
 project, and plain HTTP is allowed only to a server on the same machine.
+
+**Simplification is measured against a chosen target, not certified.** CLite is one target; often
+the goal is simpler C that can be redesigned into modules. The checker reuses facts the inventory
+already records (pointer declarations and operations, calls, named writes) and adds a few AST
+constructs per function (`goto`, unions, `va_arg`, function-pointer declarations, static locals).
+Recursion comes from cycles in the direct call graph. A profile is a list of rules, and a function
+that has none of them meets the profile. Writes to a static local count under `static-local`, not
+as global writes. The provisional CLite profile says so wherever it is shown.
 
 **SVF and GCC are shown side by side.** Recipes already combine both backends conservatively; the
 details panel now shows each one's view, per program that links the code: the targets, and for

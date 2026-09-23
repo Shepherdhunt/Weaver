@@ -41,6 +41,7 @@ can be accepted. The optional LLM explains and recommends; it never edits or val
 | Validation (tracker §7) | Isolated baseline and candidate workspaces. The production compiler rebuilds every unit whose main file *or included headers* were edited. A mechanical re-check parses the patched AST again. Configured builds, tests and differential comparisons run in both workspaces; CTest and Meson results are compared test by test, so a test that already fails on the baseline is not blamed on the patch. An acceptance policy judges the results. |
 | **Validation strength** | Each validation and acceptance records whether anything ran the patched program (`behavioural`) or not (`compile-only`), shown on the card, the ledger, impact reports and the web interface. `weaver tests` and the setup form detect the project's test commands (Make `test`/`check`, CTest, Meson, test scripts); the web settings editor changes validation commands and the acceptance policy. |
 | **Contracts on borrowed pointers** | `--expect borrowed`: the target is never written and the pointer is never kept past the call, checked through casts, copies and callees. The cFS software-bus buffer (`SBBufPtr`) holds through nine pointers in `sample_app`. |
+| **Simplification checker** | `weaver simplify` and the **Simplify** tab: every analysed function against a target profile, listing each construct the target excludes with its line (pointers, addresses, pointer arithmetic, pointer/integer casts, function pointers, heap allocation, raw memory functions, `goto`, unions, variadic functions, recursion, `setjmp`/`longjmp`, inline assembly, global writes, static locals), and how many functions already meet it. Built-in profiles: CLite (provisional), no pointers, and ready for a modular redesign; projects adjust them or define their own. A guide for manual work, not a certification. |
 | **Rejection report** | `weaver report --scope apps/sample_app`: evidence, pointers by class, each recipe's eligible and blocked candidates with the failing preconditions, the precondition that alone blocks the most, and contract status. |
 | **Change impact** | Snapshots of pointer facts (the working tree, or any git revision). `weaver impact` explains each pointer whose behavior changed since a snapshot, which edited line caused it, which recipe verdicts flipped, which pinned or transaction-implied contracts broke, and optionally whether builds and differential runs still agree. `weaver check` exits 1 on high risk, for CI. |
 | **Web interface** | `weaver serve`: load or set up a project, compile, then explore a map of every pointer colored by what it does to its target. Graphs show points-to and call relationships, and a source view has inline marks. Refactors can be proposed, validated and accepted, contracts pinned, and change impact compared. `--scope` shows one subsystem of a large project. `weaver export-ui` records the interface as one read-only HTML page for sharing. |
@@ -102,6 +103,23 @@ SVF and GCC each say the pointer may point to and, for a parameter, whether a ca
 target, each with its reason. When they disagree, the recipe takes the stricter answer
 (`flow.agreement: all`).
 
+The **Simplify** tab measures progress toward a target: CLite, or simply simpler code ready for a
+modular redesign. Choose a profile to see how many functions already meet it and which constructs
+remain, by rule and by function. Open a function to jump to each construct's line. Profiles are
+set in `weaver.yaml`:
+
+```yaml
+simplify:
+  profile: clite-provisional   # or pointer-free, modular, or your own
+  add: [static-local]          # adjust the default profile
+  remove: [recursion]
+  profiles:
+    app-layer: {title: "Application layer", rules: [pointer, global-write, goto]}
+```
+
+CLite has no written specification yet, so its profile is marked provisional. Code no analysed
+configuration compiled is not checked.
+
 **AI explanations** are optional and off by default. When a project turns them on (Settings, or
 `weaver ai enable`), each pointer gets an **Explain with AI** button. The model receives that
 pointer's evidence and nearby source, may call Weaver's read-only evidence tools, and never edits
@@ -143,6 +161,8 @@ weaver coverage                               # code no configuration compiled
 weaver candidates --all                       # eligible candidates, and blocked ones with reasons
 weaver report --scope src/net -o REPORT.md    # inventory and rejection report for part of the tree
 weaver tasks                                  # declared threads of control, what was checked, who writes each global
+weaver simplify --profile clite-provisional   # constructs standing between each function and the target
+weaver simplify --function parse_msg          # one function's constructs, line by line
 
 weaver show P-1a2b3c4d5e                      # one finding: uses, targets, precondition evaluation
 weaver ai enable --provider openai-compatible --base-url http://localhost:11434/v1 --model llama3.1
@@ -289,6 +309,8 @@ The end-to-end tests capture real builds of the fixture with Clang and GCC. They
 - the task model on a pthreads program: private locals, shared globals, an address handed to a
   thread, an address published as an integer, incomplete declarations and a contradicted
   `single-threaded`;
+- the simplification checker: every construct found on its line in a purpose-built program,
+  the built-in and project-defined profiles, and the web view;
 - change impact with contracts, git snapshots and revalidation;
 - the web server's request guards, its views, scoped views, the read-only export, and the
   propose/validate/accept and setup/capture workflows through its jobs;
