@@ -381,10 +381,20 @@ class GccPta:
             return "unknown", f"{img}: argument {index + 1} of {function}() may point to ANYTHING"
         ao, co = a - SPECIAL, c - SPECIAL
         both = ao & co
-        if both:
+        # A clobber set containing ESCAPED lists escaped objects by name too: the call may reach
+        # external code that could write anything escaped.  Such an overlap is not a traced write.
+        via_escape = both & self.escaped if "ESCAPED" in c else set()
+        traced = both - via_escape
+        if traced:
             return (
                 "yes",
-                f"{img}: {function}() may write {', '.join(sorted(both))}, which argument {index + 1} may point to",
+                f"{img}: {function}() may write {', '.join(sorted(traced))}, which argument {index + 1} may point to",
+            )
+        if via_escape:
+            return (
+                "unknown",
+                f"{img}: {function}() may write escaped memory, which GCC does not track further; argument "
+                f"{index + 1} may point to escaped {', '.join(sorted(via_escape))}",
             )
         if "ANYTHING" in c:
             return "unknown", f"{img}: what a call to {function}() writes is ANYTHING"

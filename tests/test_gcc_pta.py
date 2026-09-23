@@ -39,7 +39,7 @@ g/0 (g)
 Points-to sets
 
 ANYTHING = { ANYTHING }
-ESCAPED = { }
+ESCAPED = { buf }
 NONLOCAL = { ESCAPED NONLOCAL }
 k = { NONLOCAL } same as _1
 main.clobber = { k m }
@@ -59,6 +59,8 @@ split.part.0.clobber = { }
 split.part.0.arg0 = { k }
 ext.arg0 = { NONLOCAL }
 ext.clobber = { ESCAPED NONLOCAL }
+passes.arg0 = { buf }
+passes.clobber = { ESCAPED NONLOCAL buf }
 any.arg0 = { ANYTHING }
 any.clobber = { }
 
@@ -94,6 +96,9 @@ def test_may_modify_answers():
     # external memory and a call that writes external memory: GCC cannot tell, so unknown, not yes
     assert g.may_modify("ext", 0)[0] == "unknown"
     assert "ANYTHING" in g.may_modify("any", 0)[1]
+    # buf escaped into external code the call reaches: listed in the clobber set, but not a traced write
+    status, text = g.may_modify("passes", 0)
+    assert status == "unknown" and "escaped buf" in text
     assert g.may_modify("split", 0)[0] == "unknown"  # parameters may be renumbered in a .part clone
     assert g.may_modify("missing", 0) == (
         "unknown",
