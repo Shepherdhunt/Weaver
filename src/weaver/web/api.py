@@ -128,7 +128,15 @@ def project_state(project: Project) -> dict[str, Any]:
         "snapshots": list_snapshots(project),
         "transactions": counts,
         "validation": configured_strength(project),
+        "ai": _ai_state(project),
     }
+
+
+def _ai_state(project: Project) -> dict[str, Any]:
+    from weaver.llm.keys import key_status
+
+    ai = project.ai
+    return {"enabled": ai.enabled, "provider": ai.provider, "model": ai.effective_model, "key": key_status(ai)}
 
 
 def pointer_list(project: Project, cache: Cache) -> dict[str, Any]:

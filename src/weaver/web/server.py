@@ -364,6 +364,23 @@ def route(app: App, method: str, path: str, q: dict[str, str], body: dict[str, A
         app.project = new
         app.cache = api.Cache(app.scope)
         return {"ok": True, "warnings": warnings, "settings": read_settings(new)}
+    if (method, head) == ("POST", "ai-key"):
+        # the key goes to this user's private key file, never into weaver.yaml, the page or a log
+        import dataclasses
+
+        from weaver.config import AI_PROVIDERS
+        from weaver.llm.keys import forget_key, key_status, store_key
+
+        # the provider and endpoint shown in the editor, which may not be saved yet
+        provider = body.get("provider") or proj.ai.provider
+        if provider not in AI_PROVIDERS:
+            raise ValueError(f"unknown provider {provider!r}")
+        target = dataclasses.replace(proj.ai, provider=provider, base_url=body.get("base_url") or None)
+        if body.get("forget"):
+            forget_key(target.key_id)
+        else:
+            store_key(target.key_id, str(body.get("key") or ""))
+        return {"ok": True, "key": key_status(target)}
     if (method, head) == ("GET", "pointers"):
         return api.pointer_list(proj, app.cache)
     if (method, head) == ("GET", "pointer"):

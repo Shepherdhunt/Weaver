@@ -420,3 +420,8 @@ button.pill { cursor: pointer; font: inherit; background: none; }
 .snap-ds { border: 1px solid var(--border); border-radius: 8px; padding: 5px 8px; background: var(--panel); max-width: 14em; }
 .copy-box { display: flex; gap: 8px; align-items: flex-start; margin: 6px 0 10px; }
 .copy-box pre { flex: 1; min-width: 0; margin: 0; overflow-x: auto; white-space: pre; }
+
+/* AI explanations */
+.d-ai { margin: 6px 0 2px; }
+.s-ai input.wide { width: 100%; box-sizing: border-box; border: 1px solid var(--border); border-radius: 6px; padding: 4px 7px;
+  background: var(--code-bg); color: inherit; font: 12.5px/1.4 var(--mono, ui-monospace, monospace); }

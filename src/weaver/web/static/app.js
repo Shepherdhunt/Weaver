@@ -349,6 +349,48 @@ async function openSettings() {
       text: `task model: ${(st.concurrency.tasks || []).length} task(s) declared in weaver.yaml (see weaver tasks)` }) : null);
   const backend = h("select", {}, [["auto", "auto: every backend that is available"], ["svf", "SVF only"], ["gcc", "GCC IPA points-to only"], ["none", "none (reviewed models only)"]]
     .map(([v, t]) => h("option", { value: v, text: t, selected: (st.flow.backend || "auto") === v })));
+  const ai = st.ai || { enabled: false, provider: "anthropic", model: "", base_url: "", providers: [] };
+  const aiEnabled = h("input", { type: "checkbox", id: "s-ai-on", checked: ai.enabled });
+  const aiProvider = h("select", { id: "s-ai-provider", "aria-label": "AI provider" },
+    [["anthropic", "Anthropic (Claude)"], ["openai-compatible", "OpenAI-compatible endpoint (OpenAI, Ollama, vLLM, LM Studio…)"]]
+      .map(([v, t]) => h("option", { value: v, text: t, selected: ai.provider === v })));
+  const aiModel = h("input", { id: "s-ai-model", class: "wide", value: ai.model, "aria-label": "Model" });
+  const aiUrl = h("input", { id: "s-ai-url", class: "wide", value: ai.base_url, "aria-label": "Endpoint URL" });
+  const urlField = h("div", { class: "field" }, h("label", { for: "s-ai-url", text: "Endpoint (…/v1)" }), aiUrl,
+    h("div", { class: "hint", text: "Plain http:// is accepted only for a server on this machine." }));
+  const keyInfo = h("div", { class: "hint", text: `Key: ${ai.key}` });
+  const aiKey = h("input", { id: "s-ai-key", class: "wide", type: "password", autocomplete: "off",
+    placeholder: "paste an API key to store it for your user account", "aria-label": "API key" });
+  const keyTarget = () => ({ provider: aiProvider.value, base_url: aiUrl.value.trim() || null });
+  const syncAi = () => {
+    const anthropic = aiProvider.value === "anthropic";
+    aiModel.placeholder = anthropic ? "claude-opus-5 (default)" : "model name, e.g. gpt-5 or llama3.1:70b";
+    aiUrl.placeholder = anthropic ? "" : "https://api.openai.com/v1";
+    urlField.hidden = anthropic;
+  };
+  aiProvider.addEventListener("change", syncAi);
+  syncAi();
+  const aiSection = h("div", { class: "s-ai" },
+    h("label", { class: "check" }, aiEnabled, " Show “Explain with AI” on each pointer"),
+    h("div", { class: "hint", text: "Off: nothing is sent anywhere. On: Explain sends the selected pointer's evidence and nearby " +
+      `source lines to the provider below, with your key. Every provider gets the same explanation guide (version ${ai.guide_version || 1}; ` +
+      "“weaver ai guide” prints it) and must answer in the same sections." }),
+    h("div", { class: "field" }, h("label", { for: "s-ai-provider", text: "Provider" }), aiProvider),
+    h("div", { class: "field" }, h("label", { for: "s-ai-model", text: "Model" }), aiModel),
+    urlField,
+    h("div", { class: "field" }, h("label", { for: "s-ai-key", text: "Your API key (bring your own)" }), aiKey, keyInfo,
+      h("div", { class: "s-sug" },
+        h("button", { class: "btn small", onclick: async () => {
+          if (!aiKey.value.trim()) return toast("Paste a key first");
+          try { const r = await api("ai-key", { key: aiKey.value, ...keyTarget() }); aiKey.value = ""; keyInfo.textContent = `Key: ${r.key}`; toast("Key stored for your user account"); }
+          catch (e) { fail(e); }
+        } }, "Store key"),
+        h("button", { class: "btn small ghost", onclick: async () => {
+          try { const r = await api("ai-key", { forget: true, ...keyTarget() }); keyInfo.textContent = `Key: ${r.key}`; toast("Stored key removed"); }
+          catch (e) { fail(e); }
+        } }, "Forget stored key")),
+      h("div", { class: "hint", text: `Keys are kept outside the project, readable only by your account, and never shown again. ` +
+        `An environment variable (${ai.key_env || "ANTHROPIC_API_KEY"}) takes precedence.` })));
   const level = st.strength.level;
   const body = [
     h("div", { class: "banner" + (level === "behavioural" ? " ok" : "") },
@@ -359,6 +401,7 @@ async function openSettings() {
     h("div", { class: "field" }, h("label", { class: "check" }, prov, " allow accepting provisional transactions (a required check could not run)")),
     h("div", { class: "field" }, h("label", { text: "Minimum evidence for a candidate's facts" }), minEv),
     h("h4", { text: "Preservation contract" }), h("div", { class: "field" }, conc),
+    h("h4", { text: "AI explanations (optional)" }), aiSection,
     h("h4", { text: "Flow evidence backend" }), h("div", { class: "field" }, backend,
       h("div", { class: "hint", text: "SVF is an optional AGPL-licensed tool run as a separate process; GCC IPA points-to uses the production compiler itself." })),
     h("div", { class: "hint", text: `Saving rewrites ${st.config} (comments are not kept; the previous file is saved as ${st.config.split("/").pop()}.bak).` }),
@@ -369,6 +412,7 @@ async function openSettings() {
         const res = await api("settings", {
           acceptance: { require: [...req], allow_provisional: prov.checked, min_evidence: minEv.value },
           ...(conc.value === "__tasks__" ? {} : { concurrency: conc.value || null }), flow: { backend: backend.value },
+          ai: { enabled: aiEnabled.checked, provider: aiProvider.value, model: aiModel.value.trim(), base_url: aiUrl.value.trim() },
           profiles: st.profiles.map((p) => ({ id: p.id, build: p.build || { run: "" }, tests: p.tests, compare: p.compare })),
         });
         close();
@@ -793,6 +837,8 @@ async function select(id, opts = {}) {
   else if (S.view === "source" && !opts.keepView) { S.sourceFile = S.detail.finding.file; S.focusLine = S.detail.finding.line; renderView(); }
 }
 
+function aiOn() { return !!(S.state && S.state.ai && S.state.ai.enabled); }
+
 function icon(status) {
   return status === "established" ? h("span", { class: "icon-ok", title: "established", text: "✓" })
     : status === "violated" ? h("span", { class: "icon-bad", title: "violated", text: "✗" })
@@ -823,6 +869,9 @@ function renderDetail() {
       h("a", { href: "#", onclick: (e) => { e.preventDefault(); gotoLine(f.file, f.line); } }, `${f.file}:${f.line}`),
       f.function ? ` · in ${f.function}()` : "", ` · evidence ${f.evidence_status}`,
       f.typedef_hidden ? " · hidden behind a typedef" : ""),
+    aiOn() ? h("div", { class: "d-ai" }, h("button", { class: "btn small", onclick: () => explain(f.id),
+      title: `Ask ${S.state.ai.provider} (${S.state.ai.model || "model not set"}) to explain this pointer. ` +
+        "It receives this pointer's evidence and nearby source; it never edits." }, "Explain with AI")) : null,
   );
 
   // recipes
@@ -844,7 +893,7 @@ function renderDetail() {
         h("button", { class: "btn small" + (r.eligible ? " primary" : ""), onclick: () => propose(f.id, rid),
           title: r.eligible ? "Open a transaction and preview the patch" : "Record the rejection in the ledger" },
           r.eligible ? "Propose…" : "Record as blocked"),
-        h("button", { class: "btn small", onclick: () => explain(f.id), title: "Ask the LLM planner to explain (never to edit)" }, "Explain"))));
+        null)));
   }
   box.append(rsec);
 
@@ -990,7 +1039,7 @@ async function applyTxn(id, action) {
 async function explain(fid) {
   try {
     const job = await api("explain", { finding: fid });
-    followJob(job, (res) => modal("Planner explanation (advisory)", [h("pre", { class: "diff", style: { whiteSpace: "pre-wrap" }, text: (res && res.text) || "" })], (close) => [h("button", { class: "btn", onclick: close }, "Close")]));
+    followJob(job, (res) => modal("AI explanation (advisory)", [h("pre", { class: "diff", style: { whiteSpace: "pre-wrap" }, text: (res && res.text) || "" })], (close) => [h("button", { class: "btn", onclick: close }, "Close")]));
   } catch (e) { fail(e); }
 }
 
@@ -1166,9 +1215,10 @@ const SNAP_ACTIONS = {
   accept: ["Accept", "applies a validated patch to the working tree under the acceptance policy and re-analyses.", "weaver accept T-…"],
   revert: ["Revert", "undoes an accepted transaction.", "weaver revert T-…"],
   skip: ["Skip", "closes a transaction without applying it.", "weaver skip T-…"],
-  settings: ["Save settings", "rewrites weaver.yaml with the validation commands, acceptance policy, concurrency declaration and flow backend.", "weaver tests --add …   (or edit weaver.yaml)"],
+  settings: ["Save settings", "rewrites weaver.yaml with the validation commands, acceptance policy, concurrency declaration, flow backend and AI settings.", "weaver tests --add …   (or edit weaver.yaml)"],
+  "ai-key": ["Store key", "keeps your AI provider's API key in a file readable only by your account, outside the project.", "weaver ai key"],
   contracts: ["Pin contract", "records what must stay true of this pointer; later edits that break it are flagged in Changes.", "weaver contract pin P-… --expect read-only"],
-  explain: ["Explain", "sends the pointer's evidence to the configured LLM planner for an advisory explanation (it never edits code).", "weaver explain P-… --dry-run"],
+  explain: ["Explain with AI", "sends the pointer's evidence to the AI provider the project chose, with your own key, for an advisory explanation in the guide's fixed sections (it never edits code).", "weaver explain P-… --dry-run"],
   snapshots: ["Save a baseline", "freezes today's pointer facts, recipe verdicts and source tree.", "weaver snapshot save --name baseline"],
   impact: ["Compare", "explains how pointer behaviour changed since a baseline. The report on this page was recorded when the page was made.", "weaver impact --since baseline"],
 };

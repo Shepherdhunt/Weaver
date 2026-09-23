@@ -528,6 +528,42 @@ def cmd_explain(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_ai(args: argparse.Namespace) -> int:
+    """Switch AI explanations on or off, choose the provider, store this user's key, show the guide."""
+    import getpass
+
+    from weaver.llm.keys import forget_key, keys_path, store_key
+    from weaver.llm.prompt import GUIDE_PATH, GUIDE_VERSION, system_prompt
+    from weaver.settings import ai_settings, write_settings
+
+    proj = _project(args)
+    if args.action == "guide":
+        print(system_prompt(proj.ai.notes), end="")
+        return 0
+    if args.action in ("enable", "disable"):
+        change: dict[str, Any] = {"enabled": args.action == "enable"}
+        for k in ("provider", "model", "base_url"):
+            if getattr(args, k):
+                change[k] = getattr(args, k)
+        proj, _ = write_settings(proj, {"ai": change})
+    elif args.action == "key":
+        if args.forget:
+            print("key removed" if forget_key(proj.ai.key_id) else "no stored key for this provider")
+        else:
+            key = sys.stdin.readline().strip() if not sys.stdin.isatty() else getpass.getpass("API key: ")
+            store_key(proj.ai.key_id, key)
+            print(f"key stored for {proj.ai.key_id} in {keys_path()} (readable only by you)")
+    st = ai_settings(proj)
+    print(f"AI explanations: {'on' if st['enabled'] else 'off'}")
+    print(f"  provider: {st['provider']}   model: {st['model'] or st['default_model'] or '(set ai.model)'}")
+    if st["provider"] != "anthropic":
+        print(f"  endpoint: {st['base_url'] or st['default_base_url']}")
+    print(f"  key: {st['key']}")
+    notes = f"; project notes: {proj.ai.notes}" if proj.ai.notes else ""
+    print(f"  guide: version {GUIDE_VERSION} ({GUIDE_PATH}){notes}")
+    return 0
+
+
 def cmd_auto(args: argparse.Namespace) -> int:
     from weaver.ledger import Ledger
     from weaver.pipeline import refresh
@@ -886,10 +922,10 @@ def build_parser() -> argparse.ArgumentParser:
     sp = add("slice", cmd_slice, "print the focused LLM evidence slice for a finding")
     sp.add_argument("finding")
 
-    sp = add("explain", cmd_explain, "ask the LLM planner to explain a candidate (never to edit)")
+    sp = add("explain", cmd_explain, "ask the configured AI model to explain a pointer (advisory; never edits)")
     sp.add_argument("finding")
-    sp.add_argument("--dry-run", action="store_true", help="print the request instead of calling the API")
-    sp.add_argument("--model", help="Claude model id (default: $WEAVER_MODEL or claude-opus-5)")
+    sp.add_argument("--dry-run", action="store_true", help="print the request instead of sending it")
+    sp.add_argument("--model", help="model id (default: $WEAVER_MODEL, then ai.model, then the provider's default)")
     sp.add_argument(
         "--no-fallbacks",
         action="store_true",
@@ -942,6 +978,13 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--fragment", action="store_true", help="leave out <html>, <head> and <body> (the host adds them)")
     sp.add_argument("--repo", help="git URL the page's run-it-locally steps clone")
     sp.add_argument("--branch", help="branch the page's run-it-locally steps check out")
+
+    sp = add("ai", cmd_ai, "AI explanations: status, enable/disable, provider, your API key, the guide")
+    sp.add_argument("action", nargs="?", default="status", choices=["status", "enable", "disable", "key", "guide"])
+    sp.add_argument("--provider", choices=["anthropic", "openai-compatible"])
+    sp.add_argument("--model", help="model id (required for openai-compatible)")
+    sp.add_argument("--base-url", help="Chat Completions endpoint, e.g. http://localhost:11434/v1 for Ollama")
+    sp.add_argument("--forget", action="store_true", help="with 'key': remove the stored key")
 
     sp = add("auto", cmd_auto, "propose/validate/accept eligible candidates under the acceptance policy")
     sp.add_argument("--recipe", help="restrict to one recipe (default: all)")

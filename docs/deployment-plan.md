@@ -1,9 +1,23 @@
-# Deployment plan (draft)
+# Deployment plan
 
 Goal: a subscription product at $199 per month. Users sign in through the company portal, bring their
-own repositories, trace every pointer, see what each one risks, and refactor the code toward CLite,
-a C subset without pointers and other constructs. Until then Weaver runs on local machines for
-testing.
+own repositories, trace every pointer, see what each one risks, and simplify the code. CLite, a C
+subset without pointers and many other constructs, is one possible target. Often the target is
+simply smaller, simpler software that can then be redesigned into modules. Weaver does not certify
+CLite: it helps people work through the translation problems by hand, with evidence. Until release,
+Weaver runs on local machines for testing.
+
+## Decisions made
+
+| Question | Decision |
+|---|---|
+| Where code is analysed | On the customer's machines. Weaver is licensed software they run themselves. |
+| Licence | One subscription per project, for the project's named users. Use on other projects is discouraged, not blocked. A licence file or signed token; not needed yet. |
+| Identity | The portal has no identity provider yet; one is chosen in Phase 1. |
+| Priority | Functional capability first; licensing, billing and sign-in come later. |
+| CLite | One target profile among several. The goal is simplification and modular redesign, not certification. |
+| Points-to analysis | SVF and GCC both first-class, shown side by side. |
+| AI explanations | Off by default, switchable per project. Bring your own key. One explanation guide makes every provider explain in the same way. |
 
 ## Where Weaver is today
 
@@ -17,7 +31,7 @@ testing.
 - Not yet a product: there are no accounts or licences, the only installation is from source, users
   install their own compilers and analysis tools, and CLite itself has no specification yet.
 
-## Decision 1: where customer code is analysed
+## Why customer-run
 
 Weaver builds the customer's code. It runs their build commands, compilers and tests. This can
 happen in two places, and the choice shapes everything after Phase 0.
@@ -26,7 +40,7 @@ happen in two places, and the choice shapes everything after Phase 0.
   subscription, licence and updates. Source code never leaves the customer.
 - **Hosted.** Customers connect repositories, and Weaver's cloud runs their builds.
 
-**Recommendation: customer-run first, hosted later as an option.**
+**Decided: customer-run. A hosted option stays in Phase 3 for customers who want it.**
 
 - **Export control.** The natural market (flight, defence, medical and automotive C) often cannot
   upload source: ITAR/EAR, controlled unclassified information, and contract terms rule it out.
@@ -78,8 +92,8 @@ Aim: Weaver installs on other machines without help and holds up on repositories
 ## Phase 1: paid beta, customer-run (the $199 product)
 
 1. **Sign-in through the portal.**
-   - The portal acts as an OpenID Connect provider. If it has none: Auth0, AWS Cognito, Okta or
-     self-hosted Keycloak.
+   - The portal has no identity provider yet. Candidates: Auth0, AWS Cognito, Okta or self-hosted
+     Keycloak, all of which speak OpenID Connect.
    - `weaver login` uses the OAuth 2.0 device-authorization flow (like `gh auth login`): it shows a
      code, the user approves it in the portal, and Weaver keeps a refresh token in the operating
      system's keychain.
@@ -88,9 +102,11 @@ Aim: Weaver installs on other machines without help and holds up on repositories
    - Stripe Billing: Checkout and the customer portal for the $199 plan, trials, invoices, and tax
      (Stripe Tax). Card data never reaches Weaver's servers.
    - Stripe webhooks feed an entitlement record per account.
-3. **Licence check.**
-   - A short-lived entitlement (a token signed by the company, valid for about a week) is cached
-     locally, with an offline grace period. Features are gated per plan in one module.
+3. **Licence check, per project.**
+   - A subscription covers one project and lists its named users. The licence is a file or a token
+     signed by the company, naming the project and users, valid for about a week and cached locally
+     with an offline grace period.
+   - Use on other projects is discouraged (the licence names its project), not prevented.
    - A Python tool can be patched. The value customers pay for is updates, reviewed models,
      recipes and support, not copy protection.
 4. **Distribution.** Signed releases, an update channel and release notes, from a package index
@@ -100,10 +116,11 @@ Aim: Weaver installs on other machines without help and holds up on repositories
 6. **Telemetry.** Opt-in, counts and durations only, never code, file names or identifiers.
 7. **Legal.**
    - Terms of service, EULA, privacy policy, and a data processing agreement for the portal.
-   - SVF is AGPL-3.0. Keep it an optional component that the user installs (as now), or default to
-     GCC's points-to. Either way, have counsel review it.
-   - `weaver explain` sends code excerpts to an LLM API. Keep it off by default, enable it per
-     organisation, and use the customer's own API key or a zero-data-retention agreement.
+   - SVF (AGPL-3.0) is first-class alongside GCC's points-to. It runs as a separate process and is
+     installed with `weaver[flow]`. Have counsel confirm the distribution terms.
+   - AI explanations send code excerpts to the provider the customer chooses, with the customer's
+     own key. They are off by default and switched on per project. A local model server keeps
+     everything on the customer's machine.
 8. **Support.** A documentation site, a guide to onboarding a repository (build command with
    `{cc}`, tests, programs, tasks), and an issue intake.
 
@@ -137,18 +154,18 @@ Aim: Weaver installs on other machines without help and holds up on repositories
     audit logs.
   - FedRAMP- or ITAR-compliant hosting is a separate, expensive track.
 
-## Product track, in parallel: from pointer risk to CLite
+## Product track, in parallel: from pointer risk to simpler software
 
-1. **CLite specification (blocker).** Weaver needs the language definition:
-   - which constructs CLite forbids besides pointers (unions, `goto`, variadic functions,
-     function pointers, dynamic allocation, recursion?);
-   - what it offers instead (value records, indexed collections, typed object IDs).
-
-   Until then the `clite` capabilities in `weaver.yaml` stay `provisional` or `unknown`, and no
-   recipe can claim CLite export.
-2. **Conformance checker.** From the AST, list every construct in each function and file that
-   CLite does not allow. A function is CLite-ready when it has none and no pointer. Readiness
-   becomes a metric with the same progress bar as removed pointers.
+1. **Simplification checker with target profiles.**
+   - From the AST, list every construct in each function and file that the chosen target does not
+     allow: pointers, `goto`, unions, variadic functions, function pointers, dynamic allocation,
+     recursion, casts and so on.
+   - CLite is one profile. Others describe a simplification goal (for example "no pointers in
+     application code" or "no dynamic allocation"), and projects can adjust rules.
+   - A function that meets the profile counts as ready. Readiness becomes a metric with the same
+     progress bar as removed pointers. It is a guide for manual work, not a certification.
+2. **CLite definition.** When a CLite specification exists, its rules replace the provisional CLite
+   profile. Until then the profile is marked provisional.
 3. **Risk view.**
    - Score each pointer from facts Weaver already has: escapes, writes through, unknown targets,
      concurrent writers, pointer arithmetic, casts to integers, borrowed buffers.
@@ -161,28 +178,22 @@ Aim: Weaver installs on other machines without help and holds up on repositories
    - callbacks → enumerated dispatch.
 
    Each comes with preconditions, evidence and validation as today.
-5. **Translation.** Once a function conforms, emit it as CLite (if CLite has its own syntax) or
-   certify it in place. Adapters at the C/CLite boundary stay on the ledger until removed.
+5. **Translation support.** For a function that meets its profile, help the manual translation
+   into CLite or into a module of the redesign. Adapters at the boundary stay on the ledger until
+   removed.
 6. **Precision at scale.** Field-sensitive ownership and lock-aware concurrency (see
    [`architecture.md`](architecture.md), next milestones).
 
-## Open decisions
+## Still open
 
-1. Where code is analysed: customer-run first (recommended), or hosted.
-2. What $199 per month covers: one user or one organisation, and limits on projects or code size
-   (essential if hosted).
-3. The portal's identity provider: an existing one, or which to adopt.
-4. The CLite specification: who owns it and where it lives.
-5. SVF in the paid product: an optional add-on, or GCC's points-to only.
-6. LLM features: included, bring-your-own key, or off.
+- The portal's identity provider (Phase 1).
+- Who owns the CLite definition, and where it lives.
 
-## Next work items (need none of the decisions above)
+## Next work items, functional first
 
-1. `weaver doctor` and the container image.
-2. Several projects per server, with recent projects remembered.
-3. The risk view and risk report.
-4. A conformance-checker skeleton against a provisional rule list, replaced once the CLite
-   specification exists.
+1. AI explanations: on/off per project, bring-your-own key, one shared guide for every provider.
+2. SVF and GCC evidence side by side in the interface.
+3. The simplification checker with target profiles.
+4. The risk view and risk report.
 5. The output-parameter recipe.
-
-Phase 1 starts once decisions 1-3 are made.
+6. Several projects per server; `weaver doctor` and the container image.

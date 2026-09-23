@@ -94,9 +94,32 @@ def read_settings(project: Project) -> dict[str, Any]:
         "concurrency": (raw.get("preservation") or {}).get("concurrency"),
         "flow": {"backend": ((raw.get("flow") or {}).get("backend")) or "auto"},
         "profiles": profiles,
+        "ai": ai_settings(project),
         "strength": configured_strength(project),
         "kinds": POLICY_KINDS,
         "evidence_levels": EVIDENCE_LEVELS,
+    }
+
+
+def ai_settings(project: Project) -> dict[str, Any]:
+    """The AI section as the settings editor shows it.  Never contains a key, only where one comes from."""
+    from weaver.config import AI_PROVIDERS
+    from weaver.llm.keys import key_status
+    from weaver.llm.prompt import GUIDE_VERSION
+
+    ai = project.ai
+    return {
+        "enabled": ai.enabled,
+        "provider": ai.provider,
+        "model": ai.model or "",
+        "default_model": AI_PROVIDERS[ai.provider]["model"] or "",
+        "base_url": ai.base_url or "",
+        "default_base_url": AI_PROVIDERS[ai.provider]["base_url"] or "",
+        "key_env": ai.key_env,
+        "key": key_status(ai),
+        "tools": ai.tools,
+        "guide_version": GUIDE_VERSION,
+        "providers": list(AI_PROVIDERS),
     }
 
 
@@ -147,6 +170,27 @@ def write_settings(project: Project, changes: dict[str, Any]) -> tuple[Project, 
         else:
             pres.pop("concurrency", None)
         raw["preservation"] = pres
+    if "ai" in changes:
+        from weaver.config import AI_PROVIDERS
+
+        a = changes["ai"] or {}
+        ai = dict(raw.get("ai") or {})
+        if "enabled" in a:
+            ai["enabled"] = bool(a["enabled"])
+        if a.get("provider"):
+            if a["provider"] not in AI_PROVIDERS:
+                raise ConfigError(f"ai.provider must be one of {', '.join(AI_PROVIDERS)}")
+            ai["provider"] = a["provider"]
+        for k in ("model", "base_url"):
+            if k in a:
+                v = str(a[k] or "").strip()
+                if v:
+                    ai[k] = v
+                else:
+                    ai.pop(k, None)
+        if ai.get("enabled") and ai.get("provider") == "openai-compatible" and not ai.get("model"):
+            raise ConfigError("an OpenAI-compatible provider needs a model name")
+        raw["ai"] = ai
     if (changes.get("flow") or {}).get("backend"):
         fl = dict(raw.get("flow") or {})
         fl["backend"] = changes["flow"]["backend"]

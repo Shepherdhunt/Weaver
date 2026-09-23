@@ -136,6 +136,72 @@ class FlowConfig:
         return backend in self.backends
 
 
+# AI providers for explanations (``ai.provider``): Claude through Anthropic's SDK, or any server that
+# speaks the OpenAI-style Chat Completions API (hosted services and local model servers alike).
+AI_PROVIDERS: dict[str, dict[str, str | None]] = {
+    "anthropic": {"model": "claude-opus-5", "key_env": "ANTHROPIC_API_KEY", "base_url": None},
+    "openai-compatible": {"model": None, "key_env": "OPENAI_API_KEY", "base_url": "https://api.openai.com/v1"},
+}
+
+
+@dataclass
+class AIConfig:
+    """AI explanations (``ai:`` in weaver.yaml).  Off unless enabled; keys never live in this file."""
+
+    enabled: bool = False
+    provider: str = "anthropic"
+    model: str | None = None
+    base_url: str | None = None
+    api_key_env: str | None = None  # the environment variable holding the key (default per provider)
+    tools: bool = True  # let the model call Weaver's read-only evidence tools
+    effort: str = "high"  # Claude only
+    notes: Path | None = None  # project-specific notes appended to the explanation guide
+
+    @property
+    def effective_model(self) -> str | None:
+        return self.model or AI_PROVIDERS[self.provider]["model"]
+
+    @property
+    def effective_base_url(self) -> str | None:
+        return (self.base_url or AI_PROVIDERS[self.provider]["base_url"] or "").rstrip("/") or None
+
+    @property
+    def key_env(self) -> str:
+        return self.api_key_env or str(AI_PROVIDERS[self.provider]["key_env"])
+
+    @property
+    def key_id(self) -> str:
+        """Which stored key this configuration uses: one per provider, or per endpoint host."""
+        if self.provider == "anthropic":
+            return "anthropic"
+        from urllib.parse import urlparse
+
+        return "openai-compatible:" + (urlparse(self.effective_base_url or "").netloc or "default")
+
+
+def _ai(raw: Any, base: Path) -> AIConfig:
+    if not raw:
+        return AIConfig()
+    if not isinstance(raw, dict):
+        raise ConfigError("ai: must be a mapping (enabled, provider, model, base_url, api_key_env, tools, notes)")
+    provider = str(raw.get("provider") or "anthropic")
+    if provider not in AI_PROVIDERS:
+        raise ConfigError(f"ai.provider: unknown provider {provider!r}; use {' or '.join(AI_PROVIDERS)}")
+    effort = str(raw.get("effort") or "high")
+    if effort not in ("low", "medium", "high", "xhigh", "max"):
+        raise ConfigError("ai.effort must be low, medium, high, xhigh or max")
+    return AIConfig(
+        enabled=bool(raw.get("enabled", False)),
+        provider=provider,
+        model=str(raw["model"]) if raw.get("model") else None,
+        base_url=str(raw["base_url"]) if raw.get("base_url") else None,
+        api_key_env=str(raw["api_key_env"]) if raw.get("api_key_env") else None,
+        tools=bool(raw.get("tools", True)),
+        effort=effort,
+        notes=(base / str(raw["notes"])).resolve() if raw.get("notes") else None,
+    )
+
+
 @dataclass
 class Project:
     config_path: Path
@@ -152,6 +218,7 @@ class Project:
     contracts_path: Path | None = None
     # Images that run together (see weaver.link): [{name, images, entry_points, closed, profile}]
     programs: list[dict[str, Any]] = field(default_factory=list)
+    ai: AIConfig = field(default_factory=AIConfig)
 
     def profile(self, pid: str) -> Profile:
         for p in self.profiles:
@@ -292,6 +359,7 @@ def load_project(path: str | os.PathLike[str] | None = None) -> Project:
         externals=dict(fl.get("externals") or {}),
     )
     return Project(
+        ai=_ai(raw.get("ai"), base),
         flow=flow,
         contracts_path=(base / proj.get("contracts", "weaver-contracts.yaml")).resolve(),
         config_path=cfg_path,
@@ -360,6 +428,15 @@ acceptance:
   require: [compile, mechanical-recheck]   # add 'testing' / 'differential-testing' when configured
   allow_provisional: false
   min_evidence: secondary-checked
+
+# AI explanations: optional and off by default.  Every provider gets the same
+# explanation guide ('weaver ai guide').  Keys never go in this file: set the
+# provider's environment variable, or store one for your account ('weaver ai key').
+ai:
+  enabled: false
+  provider: anthropic          # or openai-compatible: OpenAI, Ollama, vLLM, LM Studio...
+  # model: claude-opus-5
+  # base_url: http://localhost:11434/v1   # openai-compatible only; a local server keeps code on this machine
 
 profiles:
   - id: native-dev

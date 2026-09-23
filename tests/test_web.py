@@ -315,3 +315,25 @@ def test_read_only_snapshot_export(analysed, tmp_path):
     assert snap["web"] == "https://github.com/o/r/tree/b" and len(snap["datasets"]) == 2
     assert "#include <stdio.h>" in "\n".join(snap["datasets"][0]["responses"]["source?file=src/main.c"]["lines"])
     assert render_page([ds]).startswith("<!doctype html>")
+
+
+@needs_clang
+def test_ai_settings_and_key_through_the_browser(client, tmp_path, monkeypatch):
+    """AI explanations are off until switched on; a stored key is kept per user and never sent back."""
+    monkeypatch.setenv("WEAVER_CONFIG_DIR", str(tmp_path / "cfg"))
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    assert client.api("state")["ai"]["enabled"] is False
+    assert client.api("settings")["ai"]["enabled"] is False
+    local = {"provider": "openai-compatible", "base_url": "https://models.example.com/v1"}
+    res = client.api("settings", {"ai": {"enabled": True, "model": "m1", **local}})
+    assert res["settings"]["ai"]["enabled"] and res["settings"]["ai"]["key"] == "missing"
+    st = client.api("state")["ai"]
+    assert st == {"enabled": True, "provider": "openai-compatible", "model": "m1", "key": "missing"}
+    assert client.api("ai-key", {"key": "sk-secret-123", **local})["key"].startswith("stored on this machine")
+    for view in ("settings", "state"):
+        assert "sk-secret-123" not in json.dumps(client.api(view))
+    assert "sk-secret-123" not in client.app.project.config_path.read_text()
+    assert client.api("ai-key", {"forget": True, **local})["key"] == "missing"
+    client.api("settings", {"ai": {"enabled": True, "provider": "openai-compatible", "model": ""}}, status=409)
+    client.api("settings", {"ai": {"enabled": False}})
+    assert client.api("state")["ai"]["enabled"] is False
