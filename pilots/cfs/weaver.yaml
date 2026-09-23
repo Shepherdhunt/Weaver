@@ -11,8 +11,39 @@ project:
 
 preservation:
   behaviors: [outputs, persistent-state, side-effect-ordering, event-messages, telemetry]
-  # cFS apps each run in their own OSAL task and share data through the software bus and
-  # tables; no project-wide single-threaded claim is made.  See pilots/cfs/README.md.
+  # cFS apps each run in their own OSAL task and share data through the software bus and tables.
+  # The threads of control of cpu1 are declared here and checked by Weaver ('weaver tasks'):
+  # every thread the code starts must be declared, and a refactor that moves a read or write
+  # across a call needs every other task to leave the object alone.  See pilots/cfs/README.md.
+  concurrency:
+    model: tasks
+    programs: [cpu1]                  # the host tools start no thread; Weaver checks that too
+    tasks:                            # one instance each unless 'instances: many'
+      - {name: startup, entry: [main, CFE_Assert_LibInit, SAMPLE_LIB_Init]}  # ES start-up, library init, idle loop
+      - {name: CFE_ES, entry: CFE_ES_TaskMain}
+      - {name: CFE_EVS, entry: CFE_EVS_TaskMain}
+      - {name: CFE_SB, entry: CFE_SB_TaskMain}
+      - {name: CFE_TBL, entry: CFE_TBL_TaskMain}
+      - {name: CFE_TIME, entry: CFE_TIME_TaskMain}
+      - {name: CFE_TIME_TONE, entry: CFE_TIME_Tone1HzTask}
+      - {name: CFE_TIME_1HZ, entry: CFE_TIME_Local1HzTask}
+      - {name: CFE_ES_BACKGROUND, entry: CFE_ES_BackgroundTask}
+      - {name: SAMPLE_APP, entry: SAMPLE_APP_Main}
+      - {name: OS_TIMEBASE, entry: OS_TimeBasePthreadEntry, instances: many}   # one thread per time base
+      - {name: OS_CONSOLE, entry: OS_ConsoleTask_Entry}
+      - {name: PSP_SYSMON, entry: linux_sysmon_Task}
+    interrupts:
+      - {name: SIGHUP, entry: OS_NoopSigHandler}
+      - {name: PSP_EXCEPTION, entry: [CFE_PSP_ExceptionSigHandler, CFE_PSP_ExceptionSigHandlerSuspend]}
+    # OSAL and ES start every task through these trampolines, which call the real entry through a pointer
+    dispatchers: [OS_PthreadTaskEntry, CFE_ES_TaskEntryPoint]
+    indirect_calls:                   # the three calls SVF cannot resolve, resolved from the source
+      - {at: "cfe/modules/es/fsw/src/cfe_es_apps.c:1016", targets: [CFE_Assert_LibInit, SAMPLE_LIB_Init],
+         reason: library init functions named in the startup script (found by symbol lookup)}
+      - {at: "cfe/modules/time/fsw/src/cfe_time_tone.c:1329", targets: [],
+         unless_called: [CFE_TIME_RegisterSynchCallback], reason: time-synch callbacks; no application registers one}
+      - {at: "osal/src/os/posix/src/os-impl-idmap.c:171", targets: [OS_Posix_ReleaseTableMutex],
+         reason: pthread_cleanup_pop runs the routine pushed at line 149}
 
 acceptance:
   require: [compile, mechanical-recheck, testing]

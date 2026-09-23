@@ -33,6 +33,8 @@ class EffectModel:
     # The call starts a thread of control running the function passed as this argument ("unknown":
     # a handler Weaver cannot identify, e.g. inside a struct sigaction).  See weaver.flow.tasks.
     spawns: int | str | None = None
+    # Arguments whose targets the started thread of control receives (pthread_create's 'arg').
+    shares: list[int] = field(default_factory=list)
 
     def owned(self, file: str | None) -> bool:
         return bool(file) and any(fnmatch.fnmatch(file, g) for g in self.owns)
@@ -49,6 +51,7 @@ class EffectModel:
             "owns": self.owns,
             "retains": self.retains,
             "spawns": self.spawns,
+            "shares": self.shares,
         }
 
 
@@ -120,6 +123,7 @@ def _remap(model: EffectModel, name: str, base: str) -> EffectModel | None:
         owns=model.owns,
         retains=[mv(i) for i in model.retains],
         spawns=mv(model.spawns) if isinstance(model.spawns, int) else model.spawns,
+        shares=[mv(i) for i in model.shares],
     )
 
 
@@ -174,6 +178,7 @@ def _entries(funcs: dict[str, Any], source: str, owns: list[str] | None = None) 
             owns=pack_owns,
             retains=[int(i) for i in spec.get("retains", [])],
             spawns=_spawns(name, spec.get("spawns")),
+            shares=[int(i) for i in spec.get("shares", [])],
         )
     return out
 

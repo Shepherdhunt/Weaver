@@ -64,7 +64,7 @@ functions:
   timer_delete:    {writes: [], calls_back: false}
 
   # -- threads and synchronisation -----------------------------------------------------------
-  pthread_create:  {writes: [0], calls_back: true, retains: [3], spawns: 2, assumptions: ["the start routine runs concurrently"]}
+  pthread_create:  {writes: [0], calls_back: true, retains: [3], spawns: 2, shares: [3], assumptions: ["the start routine runs concurrently"]}
   pthread_exit:    {writes: [], calls_back: true, assumptions: ["cleanup handlers and TLS destructors run"]}
   pthread_cancel:  {writes: [], calls_back: false, assumptions: ["the target thread's cleanup handlers run in that thread"]}
   pthread_kill:    {writes: [], calls_back: true, assumptions: ["a signal to the calling thread runs its handler"]}

@@ -573,10 +573,24 @@ class ScalarInputRecipe(Recipe):
                 pre.fail(UNRESOLVED, f"{key}: the task model needs current SVF points-to evidence", "run 'weaver flow'")
                 continue
             targets = fe.param_targets(fname, idx)
-            if not targets:
-                pre.fail(UNRESOLVED, f"{key}: no points-to targets for argument {idx + 1} of {fname}()")
+            if targets is None:
+                pre.fail(UNRESOLVED, f"{key}: no points-to facts for argument {idx + 1} of {fname}()")
                 continue
             profile, _, prog = key.partition("/")
+            declared = spec.get("programs")
+            if declared and prog not in declared:
+                # the task declaration covers other programs; this one must start no thread at all
+                sites = spawn_sites(ctx.program, {key})
+                if sites:
+                    s0 = sites[0]
+                    pre.fail(
+                        UNRESOLVED,
+                        f"{key}: {s0['callee']}() starts a thread of control at {s0['site'].get('file')}:"
+                        f"{s0['site'].get('line')}, and the task declaration does not cover program {prog}",
+                    )
+                else:
+                    pos("concurrency", f"{key}: program {prog} starts no thread of control")
+                continue
             tm = ctx.tasks(profile, prog)
             status, ok, bad = tm.concurrent(fkey, set(targets))
             for t in ok:

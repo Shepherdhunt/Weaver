@@ -23,10 +23,12 @@ SRC = """\
 
 int shared_counter;             /* written by the worker thread */
 static int main_only;
+unsigned long g_addr;           /* an address kept as an integer */
 
 static int scale(const int *f, int x) { return x * *f; }
 static int peek(const int *p) { return *p + 1; }
 static int twice(const int *h) { return 2 * *h; }
+static int peek3(const int *s) { return *s - 1; }
 
 static void *worker(void *arg)
 {
@@ -42,19 +44,31 @@ static void *filler(void *arg)
     return 0;
 }
 
+static void *poker(void *arg)
+{
+    (void)arg;
+    *(int *)g_addr = 5;         /* a pointer made from an integer */
+    return 0;
+}
+
 int main(void)
 {
-    pthread_t t1, t2;
+    pthread_t t1, t2, t3;
     int local = 3;              /* main's own stack: no other thread has its address */
     int handoff = 0;            /* its address is given to filler */
+    int secret = 1;             /* its address is published as an integer */
+    g_addr = (unsigned long)&secret;
     pthread_create(&t1, 0, worker, 0);
     pthread_create(&t2, 0, filler, &handoff);
+    pthread_create(&t3, 0, poker, 0);
     main_only = scale(&local, 2);
     int r = peek(&shared_counter);
     int s = twice(&handoff);
+    int q = peek3(&secret);
     pthread_join(t1, 0);
     pthread_join(t2, 0);
-    return r + s + main_only;
+    pthread_join(t3, 0);
+    return r + s + q + main_only;
 }
 """
 
@@ -64,6 +78,7 @@ TASKS = {
         {"name": "main", "entry": "main"},
         {"name": "worker", "entry": "worker"},
         {"name": "filler", "entry": "filler"},
+        {"name": "poker", "entry": "poker"},
     ],
 }
 
@@ -102,7 +117,7 @@ def _verdicts(root: Path) -> dict[str, tuple[bool, object]]:
     ctx = RecipeContext(proj, inv)
     out = {}
     for f in inv["findings"]:
-        if CATALOG["scalar-input"].applicable(f) and f.get("function") in ("scale", "peek", "twice"):
+        if CATALOG["scalar-input"].applicable(f) and f.get("function") in ("scale", "peek", "twice", "peek3"):
             res = CATALOG["scalar-input"].evaluate(ctx, f)
             conc = next(p for p in res.preconditions if p.id == "SI.no-concurrent-writers")
             out[f["function"]] = (res.eligible, conc)
@@ -120,22 +135,31 @@ def test_task_model_decides_concurrent_writers(threads):
     ctx = RecipeContext(proj, load_inventory(proj))
     tm = ctx.tasks("clang", "app")
     assert tm.problems == []
-    assert {c.name: c.kind for c in tm.contexts.values()} == {"main": "task", "worker": "task", "filler": "task"}
+    assert {c.name: c.kind for c in tm.contexts.values()} == {
+        "main": "task",
+        "worker": "task",
+        "filler": "task",
+        "poker": "task",
+    }
+    assert tm.escape_unknown == []
     v = _verdicts(threads)
     eligible, conc = v["scale"]
     assert conc.status == "established" and eligible, conc
     assert any("runs only in task main" in e for e in conc.evidence)
-    assert any("not held by any other context's pointers: local" in e for e in conc.evidence)
+    assert any("never escape their task: local" in e for e in conc.evidence)
     _, conc = v["peek"]
     assert conc.status == "violated" and any("task worker may write shared_counter" in e for e in conc.evidence)
     _, conc = v["twice"]
     assert conc.status == "violated" and any("task filler may write handoff" in e for e in conc.evidence)
+    # secret's address escapes as an integer; poker writes through a pointer made from one
+    _, conc = v["peek3"]
+    assert conc.status == "unresolved" and any("task poker has writes Weaver cannot bound" in e for e in conc.evidence)
 
 
 @needs_svf_tasks
 def test_declarations_are_checked(threads):
     # a thread the declaration forgets: the model is incomplete, so nothing is established
-    _set_concurrency(threads, {**TASKS, "tasks": TASKS["tasks"][:2]})
+    _set_concurrency(threads, {**TASKS, "tasks": [t for t in TASKS["tasks"] if t["name"] != "filler"]})
     try:
         proj = load_project(threads)
         tm = RecipeContext(proj, load_inventory(proj)).tasks("clang", "app")

@@ -321,8 +321,11 @@ async function openSettings() {
       onchange: (e) => { e.target.checked ? req.add(k) : req.delete(k); } }), ` ${k} `, h("span", { class: "d-sub", text: kindHelp[k] || "" }))));
   const prov = h("input", { type: "checkbox", checked: st.acceptance.allow_provisional });
   const minEv = h("select", {}, st.evidence_levels.map((l) => h("option", { value: l, text: l, selected: l === st.acceptance.min_evidence })));
+  const taskModel = st.concurrency && typeof st.concurrency === "object";
   const conc = h("select", {}, h("option", { value: "", text: "not declared (interface recipes stay blocked)", selected: !st.concurrency }),
-    h("option", { value: "single-threaded", text: "single-threaded: nothing else writes during a call", selected: st.concurrency === "single-threaded" }));
+    h("option", { value: "single-threaded", text: "single-threaded: nothing else writes during a call (checked: no thread is started)", selected: st.concurrency === "single-threaded" }),
+    taskModel ? h("option", { value: "__tasks__", selected: true,
+      text: `task model: ${(st.concurrency.tasks || []).length} task(s) declared in weaver.yaml (see weaver tasks)` }) : null);
   const backend = h("select", {}, [["auto", "auto: every backend that is available"], ["svf", "SVF only"], ["gcc", "GCC IPA points-to only"], ["none", "none (reviewed models only)"]]
     .map(([v, t]) => h("option", { value: v, text: t, selected: (st.flow.backend || "auto") === v })));
   const level = st.strength.level;
@@ -344,7 +347,7 @@ async function openSettings() {
       try {
         const res = await api("settings", {
           acceptance: { require: [...req], allow_provisional: prov.checked, min_evidence: minEv.value },
-          concurrency: conc.value || null, flow: { backend: backend.value },
+          ...(conc.value === "__tasks__" ? {} : { concurrency: conc.value || null }), flow: { backend: backend.value },
           profiles: st.profiles.map((p) => ({ id: p.id, build: p.build || { run: "" }, tests: p.tests, compare: p.compare })),
         });
         close();

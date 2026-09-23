@@ -191,3 +191,16 @@ def test_flow_backend_config(tmp_path):
     (root / "weaver.yaml").write_text(yaml.safe_dump(cfg))
     with pytest.raises(ConfigError):
         load_project(root)
+
+
+def test_settings_keep_a_task_model(tmp_path):
+    """Saving other settings leaves a declared task model alone."""
+    root = _config(tmp_path)
+    cfg = yaml.safe_load((root / "weaver.yaml").read_text())
+    tasks = {"model": "tasks", "tasks": [{"name": "main", "entry": "main"}]}
+    cfg["preservation"] = {"concurrency": tasks}
+    (root / "weaver.yaml").write_text(yaml.safe_dump(cfg))
+    proj = load_project(root)
+    assert read_settings(proj)["concurrency"] == tasks
+    write_settings(proj, {"acceptance": {"require": ["compile", "mechanical-recheck"]}})
+    assert yaml.safe_load((root / "weaver.yaml").read_text())["preservation"]["concurrency"] == tasks

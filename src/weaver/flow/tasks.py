@@ -41,15 +41,24 @@ Each context's code is the call-graph closure of its entries (indirect calls
 through SVF's targets, boundary calls judged by their models), and its writes
 are summarised once as points-to objects.  ``concurrent`` then decides, for the
 targets of a parameter, whether any context other than the one running the call
-(or a second instance of it) may write them.  A write Weaver cannot bound (an
-unmodelled call, a write through unknown memory) only matters for objects that
-code can reach: a stack object whose address no pointer in that context holds is
-out of its reach, under the pointer-provenance rule compilers already assume.
+(or a second instance of it) may write them.
+
+Stack objects get a thread-escape analysis first.  A local lives in the frame of
+the task that runs its function; another task (or another instance of the same
+task, which has its own frame) can reach it only if its address escapes: is
+stored, directly or through other objects, into a global, heap or unknown
+object, is handed to a thread start (a model's ``shares`` argument), or is
+converted to an integer.  SVF's points-to sets of object nodes are the objects'
+contents, so escape is the closure of those contents from the shared roots.  A
+target that does not escape cannot be written concurrently, whatever the
+context-insensitive write summaries say (a helper called from several tasks
+writes, in each, only the objects its caller passed).  This relies on pointer
+provenance, which compilers already assume: code that never obtains an object's
+address cannot reach it, even through a pointer made from an integer.
 """
 
 from __future__ import annotations
 
-import bisect
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -161,8 +170,9 @@ class TaskModel:
             for k in c.funcs:
                 self._ctx_of.setdefault(k, []).append(c)
         self._summaries: dict[str, WriteSummary] = {}
-        self._exposure: dict[int, set[str]] | None = None
-        self._spans: dict[str, list[tuple[int, int, str]]] | None = None
+        self._escaped: set[int] | None = None
+        self._escape_unknown: list[str] = []
+        self._escape_why: dict[int, str] = {}
 
     # -- declaration ---------------------------------------------------------
     def _declare(self, t: Any, kind: str) -> None:
@@ -178,8 +188,10 @@ class TaskModel:
 
     # -- reachability ----------------------------------------------------------
     def _closure(self, c: Context) -> None:
+        # Code a task calls runs in that task, framework APIs included: unlike may_modify, which judges
+        # an API call by its reviewed contract, reachability and write summaries follow the analysed
+        # body of every callee (so callbacks an API runs, e.g. a table validation function, are found).
         stack = [k for e in c.entries for k in self._by_name.get(e, [])]
-        models = self.program.models
         while stack:
             k = stack.pop()
             if k in c.funcs or k not in self.funcs:
@@ -187,8 +199,6 @@ class TaskModel:
             c.funcs.add(k)
             f = self.program.funcs[k]
             for call in f["calls"]:
-                if models.is_boundary(call["callee"]):
-                    continue  # its effects come from the reviewed model (see summary)
                 stack.extend(t for t in self.program.resolve(k, call["callee"]) if t not in c.funcs)
             for call in f["indirect_calls"]:
                 site = call.get("site") or {}
@@ -297,7 +307,12 @@ class TaskModel:
                 if fe is None or not w.get("lc") or w.get("unknown_base"):
                     s.unbounded.append({"function": f["name"], "site": w.get("site"), "why": "write through a pointer"})
                     continue
-                pts, n = fe.pts_in_span(w["lvalue"]["file"] if w.get("lvalue") else f["file"], w["lc"])
+                wfile = w["lvalue"]["file"] if w.get("lvalue") else f["file"]
+                pts, n = fe.pts_in_span(wfile, w["lc"])
+                if n == 0:
+                    # the store's debug location lies outside the lvalue's columns: every pointer on the
+                    # statement's lines is a sound superset of the one written through
+                    pts, n = fe.pts_in_span(wfile, [w["lc"][0], 0, w["lc"][2], 1 << 20])
                 if n == 0:
                     s.unbounded.append(
                         {"function": f["name"], "site": w.get("site"), "why": "write through an unmapped pointer"}
@@ -305,8 +320,7 @@ class TaskModel:
                     continue
                 add(pts, f, w.get("site"), "writes through a pointer")
             for call in f["calls"]:
-                boundary = models.is_boundary(call["callee"])
-                if self.program.resolve(k, call["callee"]) and not boundary:
+                if self.program.resolve(k, call["callee"]):
                     continue  # analysed callee: part of this context's closure
                 m = models.lookup(call["callee"])
                 site = call.get("site")
@@ -347,48 +361,95 @@ class TaskModel:
                 s.unbounded.append({"function": f["name"], "site": a, "why": "inline assembly"})
         return s
 
-    def _function_at(self, file: str | None, line: int | None) -> str | None:
-        if self._spans is None:
-            self._spans = {}
-            for k in self.funcs:
-                f = self.program.funcs[k]
-                if f.get("line") is not None:
-                    self._spans.setdefault(f["file"], []).append((f["line"], f.get("end_line") or f["line"], k))
-            for v in self._spans.values():
-                v.sort()
-        spans = self._spans.get(file or "", [])
-        i = bisect.bisect_right(spans, (line or 0, 1 << 30, "")) - 1
-        if i >= 0 and spans[i][0] <= (line or 0) <= spans[i][1]:
-            return spans[i][2]
-        return None
+    def escaped(self) -> set[int]:
+        """Objects another thread of control may reach: the shared roots and everything their contents reach."""
+        if self._escaped is not None:
+            return self._escaped
+        fe = self.fe
+        if fe is None:
+            self._escaped = set()
+            return self._escaped
+        roots: set[int] = {
+            o
+            for o, d in fe.objects.items()
+            if d.get("kind") in ("global", "heap", "external") or o in fe.unknown_objects({o})
+        }
+        why: dict[int, str] = {}
+        self._escape_unknown = []
 
-    def exposure(self, oid: int) -> set[str]:
-        """Functions with a pointer that may point to stack object ``oid`` (whose code can reach it)."""
-        if self._exposure is None:
-            self._exposure = {}
-            if self.fe is not None:
-                stack = {o for o, d in self.fe.objects.items() if d.get("kind") == "stack"}
-                for n in self.fe.nodes.values():
-                    loc = n.get("loc") or {}
-                    hit = stack.intersection(n.get("pts") or ())
-                    if not hit:
+        def exposed(file: str, designator: Any, lc: Any, what: str, loads: Any = None) -> None:
+            """Add what an expression may point to (the object '&x' names, or the content of a variable
+            read) to the shared roots."""
+            objs: set[int] = set()
+            mapped = False
+            if loads:
+                holders = fe.objects_for_decl(
+                    loads.get("decl_file"), loads.get("decl_line"), loads.get("name"), bool(loads.get("global_"))
+                ) or fe.objects_for_decl(loads.get("decl_file"), loads.get("decl_line"), f"{loads.get('name')}.addr")
+                objs = {p for h in holders for p in (fe.nodes.get(h) or {}).get("pts", [])}
+                mapped = bool(holders)
+            elif designator:
+                objs = fe.objects_for_decl(
+                    designator.get("decl_file"),
+                    designator.get("decl_line"),
+                    designator.get("name"),
+                    bool(designator.get("global_")),
+                )
+                mapped = bool(objs)
+            elif lc:
+                objs, n = fe.pts_in_span(file, lc)
+                if n == 0:  # the value's debug location may be on a neighbouring line of the statement
+                    objs, n = fe.pts_in_span(file, [max(1, lc[0] - 2), 0, lc[2] + 2, 1 << 20])
+                mapped = n > 0  # pointer nodes found: their (possibly empty) points-to set is what is exposed
+            if not mapped:
+                self._escape_unknown.append(what)
+            for o in objs:
+                why.setdefault(o, what)
+            roots.update(objs)
+
+        # thread-start arguments and pointers converted to integers expose what they point to
+        for k in self.funcs:
+            f = self.program.funcs[k]
+            for call in f["calls"]:
+                m = self.program.models.lookup(call["callee"])
+                for i in getattr(m, "shares", None) or []:
+                    if i < len(call["args"]) and not call["args"][i].get("null"):
+                        a = call["args"][i]
+                        exposed(
+                            f["file"], a.get("addr_of"), a.get("lc"), f"handed to {call['callee']}() in {f['name']}()"
+                        )
+        for fkey, per_unit in (self.program.inv.get("operations") or {}).items():
+            if fkey not in self.funcs:
+                continue
+            file = self.program.funcs[fkey]["file"]
+            for rec in per_unit.values():
+                for site in rec.get("sites", []):
+                    if site.get("kind") != "integer-pointer-conversion" or site.get("cast_kind") != "PointerToIntegral":
                         continue
-                    if loc.get("kind") == "inst":
-                        k = self._function_at(loc.get("file"), loc.get("line"))
-                    elif loc.get("kind") == "arg":
-                        k = next(iter(self._by_name.get(loc.get("function") or "", [])), None)
-                    else:
-                        k = None
-                    for o in hit:
-                        self._exposure.setdefault(o, set()).add(k or "?")
-        return self._exposure.get(oid, set())
+                    what = f"converted to an integer in {fkey.split('::')[-1]}() at line {site.get('line')}"
+                    if "operand_lc" not in site:
+                        self._escape_unknown.append(what + " (inventory predates operand records)")
+                        continue
+                    if site.get("operand_null_based") or site.get("operand_function"):
+                        continue
+                    exposed(file, site.get("operand"), site.get("operand_lc"), what, site.get("operand_loads"))
+        escaped = set(roots)
+        stack = list(roots)
+        while stack:
+            m = stack.pop()
+            for o in (fe.nodes.get(m) or {}).get("pts", []):  # an object node's points-to set: its contents
+                if o not in escaped:
+                    escaped.add(o)
+                    stack.append(o)
+        self._escaped = escaped
+        self._escape_why = why
+        return escaped
 
-    def owner_function(self, oid: int) -> str | None:
-        d = (self.fe.objects.get(oid) if self.fe else None) or {}
-        if d.get("kind") != "stack":
-            return None
-        loc = d.get("loc") or {}
-        return self._function_at(loc.get("file"), loc.get("line"))
+    @property
+    def escape_unknown(self) -> list[str]:
+        """Exposures Weaver could not map to objects; while any exist, no local is known not to escape."""
+        self.escaped()
+        return self._escape_unknown
 
     def concurrent(self, key: str, targets: set[int]) -> tuple[str, list[str], list[str]]:
         """(established | violated | unresolved, evidence, counter-evidence) for writes to ``targets``
@@ -397,15 +458,44 @@ class TaskModel:
         neg: list[tuple[str, str]] = []
         running = self.contexts_of(key)
         fname = self.program.funcs.get(key, {}).get("name", key)
+        if not targets:
+            return "established", [f"the parameter of {fname}() points to no object in any analysed call"], []
+        unknown = self.fe.unknown_objects(targets) if self.fe else set()
+        if unknown:
+            return (
+                "unresolved",
+                [],
+                [f"the parameter of {fname}() may point to memory points-to analysis cannot identify"],
+            )
         if not running:
-            return "unresolved", [], [f"{fname}() is reached from no declared task (entry points: see weaver tasks)"]
+            if self.problems or any(c.unresolved for c in self.contexts.values()):
+                return (
+                    "unresolved",
+                    [],
+                    [f"{fname}() is reached from no declared task, and the declaration is incomplete"],
+                )
+            return (
+                "established",
+                [
+                    f"no declared task runs {fname}() in {self.prog_key}: every thread of control is declared and "
+                    "every indirect call resolved, and none reaches it"
+                ],
+                [],
+            )
         if self.problems:
             neg.append(("unresolved", "the task declaration is incomplete: " + self.problems[0]))
         conflicting = [c for c in self.contexts.values() if c not in running or c.many or len(running) > 1]
-        names = {o: (self.fe.describe(o).get("name") if self.fe else str(o)) for o in targets}
+        names = {o: self._name(o) for o in targets}
+        esc = self.escaped()
+        local = (
+            set()
+            if self.escape_unknown  # an exposure Weaver could not map: any local may be exposed
+            else {o for o in targets if (self.fe.objects.get(o) or {}).get("kind") == "stack" and o not in esc}
+        )
+        checked = targets - local
         for c in conflicting:
             s = self.summary(c)
-            hit = sorted(targets & set(s.objs))
+            hit = sorted(checked & set(s.objs))
             for o in hit[:3]:
                 w = s.objs[o]
                 site = w.get("site") or {}
@@ -420,8 +510,8 @@ class TaskModel:
                 continue
             if s.owned:
                 own = sorted(
-                    str(names[o])
-                    for o in targets
+                    names[o]
+                    for o in checked
                     if any(w["model"].owned((self.fe.describe(o) if self.fe else {}).get("file")) for w in s.owned)
                 )
                 if own:
@@ -434,7 +524,7 @@ class TaskModel:
                     )
                     continue
             if s.unbounded:
-                reach = [o for o in targets if self._reachable(o, c)]
+                reach = sorted(checked)
                 if reach:
                     u = s.unbounded[0]
                     site = u.get("site") or {}
@@ -449,29 +539,69 @@ class TaskModel:
         if not neg:
             run = ", ".join(self._label(c) for c in running)
             pos.append(f"{fname}() runs only in {run}; {len(conflicting)} other context(s) checked")
-            pos.append("possible targets: " + ", ".join(sorted(str(n) for n in names.values())))
-            stack = [o for o in targets if (self.fe.objects.get(o) or {}).get("kind") == "stack"] if self.fe else []
-            if stack:
+            pos.append("possible targets: " + ", ".join(sorted(names.values())))
+            if local:
                 pos.append(
-                    "stack targets not held by any other context's pointers: "
-                    + ", ".join(str(names[o]) for o in stack)
-                    + " (pointer provenance: code without the address cannot reach the object)"
+                    "stack targets that never escape their task: "
+                    + ", ".join(sorted(names[o] for o in local))
+                    + " (their address is never stored in shared memory, handed to a thread or converted to an "
+                    "integer; pointer provenance)"
                 )
             return "established", pos + [f"assumption: {a}" for a in self.assumptions[:3]], []
         status = "violated" if any(s == "violated" for s, _ in neg) else "unresolved"
         return status, [], [t for _, t in neg]
 
-    def _reachable(self, oid: int, c: Context) -> bool:
-        """Whether unbounded writes in context ``c`` could reach object ``oid``."""
-        d = (self.fe.objects.get(oid) if self.fe else None) or {}
-        if d.get("kind") != "stack":
-            return True  # globals and heap objects are reachable by name or through any exposed pointer
-        return bool(self.exposure(oid) & (c.funcs | {"?"}))
+    def _name(self, oid: int) -> str:
+        d = self.fe.describe(oid) if self.fe else {"kind": "object"}
+        if d.get("name"):
+            return str(d["name"])
+        where = f" at {d['file']}:{d['line']}" if d.get("file") else ""
+        return f"a {d.get('kind') or 'unknown'} object{where}"
 
     @staticmethod
     def _label(c: Context) -> str:
         kind = {"task": "task", "interrupt": "interrupt", "dispatcher": "dispatcher", "implicit": "entry point"}[c.kind]
         return f"{kind} {c.name}" + (" (many instances)" if c.many else "")
+
+    def ownership(self) -> list[dict[str, Any]]:
+        """For each global object: the contexts whose code may write it, and its owner if there is one.
+
+        An object is *owned* by a context when that context (one instance) is the only one that may
+        write it and no other context has writes Weaver cannot bound.
+        """
+        if self.fe is None:
+            return []
+        writers: dict[int, list[str]] = {}
+        for c in self.contexts.values():
+            for o in self.summary(c).objs:
+                writers.setdefault(o, []).append(c.name)
+        unbounded = [c.name for c in self.contexts.values() if self.summary(c).unbounded]
+        out = []
+        for o, d in sorted(self.fe.objects.items()):
+            if d.get("kind") != "global" or not d.get("name") or str(d["name"]).startswith("."):
+                continue
+            w = writers.get(o, [])
+            maybe = [u for u in unbounded if u not in w]
+            owner = w[0] if len(w) == 1 and not self.contexts[w[0]].many and not maybe else None
+            loc = d.get("loc") or {}
+            out.append(
+                {
+                    "object": d["name"],
+                    "file": loc.get("file"),
+                    "line": loc.get("line"),
+                    "writers": w,
+                    "unbounded": maybe,
+                    "owner": owner,
+                    "state": "owned"
+                    if owner
+                    else "unwritten"
+                    if not w and not maybe
+                    else "shared"
+                    if len(w) > 1
+                    else "open",
+                }
+            )
+        return out
 
     def to_json(self) -> dict[str, Any]:
         return {

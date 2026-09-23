@@ -318,7 +318,7 @@ def analyze_unit(manifest: dict[str, Any], unit_dir: str, root: str) -> dict[str
                             "possible_targets": _possible_targets(n, u),
                         }
                     )
-            operations[fkey] = _operations(top, tinfo)
+            operations[fkey] = _operations(top, tinfo, tu, root)
             summary = fn_summaries.summarize_function(top, tu, root)
             functions[fkey] = summary
             function_refs.extend(summary["function_refs"])
@@ -343,7 +343,45 @@ def summarize_json(uses: list[dict[str, Any]]) -> dict[str, int]:
     return dict(sorted(out.items()))
 
 
-def _operations(fn: Node, tinfo: _TypeInfo) -> dict[str, Any]:
+def _conversion_operand(e: Node | None, tu: TranslationUnit, root: str) -> dict[str, Any]:
+    """Describe the pointer converted to an integer: which object's address, or which variable's content."""
+    out: dict[str, Any] = {"operand_lc": fn_summaries.expansion_span_lc(e) if e is not None else None}
+    if e is None:
+        return out
+    if "(*)" in (e.canonical_type or "") and "(*)(" in (e.canonical_type or "").replace(" ", ""):
+        out["operand_function"] = True  # a function pointer exposes no data object
+        return out
+    op = fn_summaries.strip(e)
+    if op is not None and op.kind == "UnaryOperator" and op.opcode == "&":
+        base = op.child(0)
+        while base is not None and base.kind in (
+            "MemberExpr",
+            "ArraySubscriptExpr",
+            "ParenExpr",
+            "ImplicitCastExpr",
+            "CStyleCastExpr",
+        ):
+            base = base.child(0)
+        if base is not None and base.kind == "IntegerLiteral":
+            out["operand_null_based"] = True  # offsetof-style '&((T *)0)->f': no object
+        else:
+            out["operand"] = fn_summaries.designator(op.child(0), root, tu)
+        return out
+    base = op
+    while base is not None and base.kind in (
+        "MemberExpr",
+        "ArraySubscriptExpr",
+        "ParenExpr",
+        "ImplicitCastExpr",
+        "CStyleCastExpr",
+    ):
+        base = base.child(0)
+    if base is not None and base.kind == "DeclRefExpr":
+        out["operand_loads"] = fn_summaries.designator(base, root, tu)  # the variable whose content is converted
+    return out
+
+
+def _operations(fn: Node, tinfo: _TypeInfo, tu: TranslationUnit | None = None, root: str = "") -> dict[str, Any]:
     counts: dict[str, int] = {}
     sites: list[dict[str, Any]] = []
     calls: dict[str, int] = {}
@@ -376,7 +414,11 @@ def _operations(fn: Node, tinfo: _TypeInfo) -> dict[str, Any]:
         elif k in ("CStyleCastExpr", "ImplicitCastExpr"):
             ck = n.cast_kind
             if ck in ("IntegralToPointer", "PointerToIntegral"):
-                add("integer-pointer-conversion", n, cast_kind=ck, explicit=k == "CStyleCastExpr")
+                extra: dict[str, Any] = {}
+                if ck == "PointerToIntegral" and tu is not None:
+                    # what is converted (a converted address is exposed; see weaver.flow.tasks)
+                    extra.update(_conversion_operand(n.child(0), tu, root))
+                add("integer-pointer-conversion", n, cast_kind=ck, explicit=k == "CStyleCastExpr", **extra)
             elif ck == "BitCast" and k == "CStyleCastExpr":
                 add("pointer-reinterpret-cast", n, to=n.qual_type)
             elif ck == "ArrayToPointerDecay":

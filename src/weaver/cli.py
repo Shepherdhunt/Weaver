@@ -630,6 +630,96 @@ def cmd_tests(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_tasks(args: argparse.Namespace) -> int:
+    """The declared threads of control, what Weaver checked about them, and who writes which global."""
+    import collections
+
+    from weaver.analysis.inventory import load_inventory
+    from weaver.flow.tasks import spawn_sites, spec_of
+    from weaver.recipes import RecipeContext
+
+    proj = _project(args)
+    ctx = RecipeContext(proj, load_inventory(proj))
+    spec = spec_of(proj.preservation)
+    out: dict[str, Any] = {"declared": spec is not None, "programs": {}}
+    for prof in proj.select_profiles(args.profile):
+        lm = ctx.link(prof.id)
+        for prog in lm.programs:
+            if not prog.closed or (args.program and prog.name != args.program):
+                continue
+            if spec is None or (spec.get("programs") and prog.name not in spec["programs"]):
+                sites = spawn_sites(ctx.program, {f"{prof.id}/{prog.name}"})
+                out["programs"][f"{prof.id}/{prog.name}"] = {"declared": False, "spawn_sites": sites}
+                continue
+            tm = ctx.tasks(prof.id, prog.name)
+            rec = tm.to_json()
+            rec["ownership"] = tm.ownership()
+            out["programs"][f"{prof.id}/{prog.name}"] = rec
+    if args.json:
+        _print_json(out)
+        return 0
+    for key, rec in out["programs"].items():
+        if not rec.get("contexts"):
+            sites = rec.get("spawn_sites") or []
+            if not sites:
+                print(f"{key}: starts no thread of control (single-threaded)")
+                continue
+            print(f"{key}: starts threads, and no task model covers it; a starting point for weaver.yaml:")
+            entries = sorted({e for s in sites for e in _spawn_entries(ctx, s)})
+            print("  preservation:\n    concurrency:\n      model: tasks\n      tasks:")
+            print("        - {name: main, entry: main}")
+            for e in entries:
+                print(f"        - {{name: {e}, entry: {e}}}")
+            for s in sites[:8]:
+                print(f"  # {s['callee']}() at {s['site'].get('file')}:{s['site'].get('line')} in {s['function']}()")
+            continue
+        status = "complete" if not rec["problems"] else f"{len(rec['problems'])} problem(s)"
+        print(f"{key}: {len(rec['contexts'])} context(s), declaration {status}")
+        for c in rec["contexts"]:
+            print(
+                f"  {c['kind']:<10} {c['name']:<24} {c['instances']:<4} {c['functions']:>5} function(s)"
+                + (
+                    f", {c['unresolved_indirect_calls']} unresolved indirect call(s)"
+                    if c["unresolved_indirect_calls"]
+                    else ""
+                )
+            )
+        for p in rec["problems"]:
+            print(f"  problem: {p}")
+        for a in rec["assumptions"]:
+            print(f"  assumption: {a}")
+        own = rec["ownership"]
+        counts = collections.Counter(o["state"] for o in own)
+        print(
+            f"  globals: {counts.get('owned', 0)} owned by one task, {counts.get('shared', 0)} written by several, "
+            f"{counts.get('open', 0)} within reach of writes Weaver cannot bound, "
+            f"{counts.get('unwritten', 0)} never written"
+        )
+        by_owner = collections.defaultdict(list)
+        for o in own:
+            if o["owner"]:
+                by_owner[o["owner"]].append(o["object"])
+        for owner, objs in sorted(by_owner.items()):
+            print(f"    {owner}: {', '.join(sorted(objs)[:10])}" + (f" (+{len(objs) - 10})" if len(objs) > 10 else ""))
+        shared = [o for o in own if o["state"] == "shared"][:10]
+        for o in shared:
+            print(f"    shared {o['object']}: {', '.join(o['writers'])}")
+    return 0
+
+
+def _spawn_entries(ctx: Any, site: dict[str, Any]) -> set[str]:
+    from weaver.flow.tasks import TaskModel
+
+    f = ctx.program.funcs[site["key"]]
+    call = next(c for c in f["calls"] if c.get("site") == site["site"])
+    m = ctx.program.models.lookup(call["callee"])
+    if not isinstance(getattr(m, "spawns", None), int):
+        return set()
+    probe = TaskModel.__new__(TaskModel)
+    probe.fe = None
+    return TaskModel._entries_of(probe, f, call, m.spawns)
+
+
 def cmd_serve(args: argparse.Namespace) -> int:
     from weaver.config import CONFIG_NAME
     from weaver.web.server import serve
@@ -800,6 +890,11 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--profile", help="profile to change (required when there are several)")
     sp.add_argument("--build", help="validation build command (default: the capture command with the real compiler)")
     sp.add_argument("--no-require", action="store_true", help="do not add 'testing' to acceptance.require")
+    sp.add_argument("--json", action="store_true")
+
+    sp = add("tasks", cmd_tasks, "threads of control: the checked task declaration and which task writes which global")
+    profiles(sp)
+    sp.add_argument("--program", help="only this program (default: every closed program)")
     sp.add_argument("--json", action="store_true")
 
     sp = add("serve", cmd_serve, "start the local web interface")
