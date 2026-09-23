@@ -59,6 +59,65 @@ def normalise(name: str) -> str:
     return n.lstrip("_") if n.startswith("__") else n
 
 
+# glibc's fortified (_chk) variants add arguments.  (position, count): ``count`` arguments are
+# inserted before the library function's argument ``position``; None: appended after the last
+# argument, so every index is unchanged.  A variant not listed here is used only when its model
+# touches nothing but argument 0.
+FORTIFY_INSERTS: dict[str, tuple[int, int] | None] = {
+    **dict.fromkeys(
+        ["memcpy", "memmove", "mempcpy", "memset", "strcpy", "stpcpy", "strncpy", "stpncpy", "strcat", "strncat"],
+        None,
+    ),
+    **dict.fromkeys(["read", "pread", "readlink", "getcwd", "realpath", "gets", "ttyname_r", "confstr"], None),
+    "printf": (0, 1),  # __printf_chk(flag, fmt, ...)
+    "vprintf": (0, 1),
+    "fprintf": (1, 1),  # __fprintf_chk(fp, flag, fmt, ...)
+    "vfprintf": (1, 1),
+    "dprintf": (1, 1),
+    "vdprintf": (1, 1),
+    "sprintf": (1, 2),  # __sprintf_chk(s, flag, slen, fmt, ...)
+    "vsprintf": (1, 2),
+    "snprintf": (2, 2),  # __snprintf_chk(s, maxlen, flag, slen, fmt, ...)
+    "vsnprintf": (2, 2),
+    "fread": (1, 1),  # __fread_chk(ptr, ptrlen, size, n, stream)
+    "fread_unlocked": (1, 1),
+    "fgets": (1, 1),  # __fgets_chk(s, size, n, stream)
+    "fgets_unlocked": (1, 1),
+    "recv": (3, 1),  # __recv_chk(fd, buf, len, buflen, flags)
+    "recvfrom": (3, 1),
+}
+
+
+def _fortified(name: str) -> bool:
+    return bool(re.search(r"_chk$", name))
+
+
+def _remap(model: EffectModel, name: str, base: str) -> EffectModel | None:
+    """The model of ``base`` with argument indices moved to where the fortified ``name`` takes them."""
+    if base not in FORTIFY_INSERTS:
+        touched = set(model.retains) | (set() if model.writes == "any" else set(model.writes))
+        return model if touched <= {0} else None
+    ins = FORTIFY_INSERTS[base]
+    if ins is None:
+        return model
+    pos, count = ins
+
+    def mv(i: int) -> int:
+        return i if i < pos else i + count
+
+    return EffectModel(
+        name,
+        model.writes if model.writes == "any" else [mv(i) for i in model.writes],
+        model.calls_back,
+        [*model.assumptions, f"fortified variant of {base}(): argument indices adjusted"],
+        model.source,
+        boundary=model.boundary,
+        writes_owned=model.writes_owned,
+        owns=model.owns,
+        retains=[mv(i) for i in model.retains],
+    )
+
+
 class Models:
     def __init__(self, entries: dict[str, EffectModel]):
         self.entries = entries
@@ -66,7 +125,13 @@ class Models:
     def lookup(self, name: str | None) -> EffectModel | None:
         if not name:
             return None
-        return self.entries.get(name) or self.entries.get(normalise(name))
+        if name in self.entries:
+            return self.entries[name]
+        base = normalise(name)
+        model = self.entries.get(base)
+        if model is None or not _fortified(name):
+            return model  # __builtin_memcpy and friends have the library signature
+        return _remap(model, name, base)
 
     def is_boundary(self, name: str | None) -> bool:
         m = self.entries.get(name) if name else None  # boundaries are exact names, never normalised

@@ -138,6 +138,16 @@ def test_effect_model_packs(tmp_path):
     assert m.lookup("OS_TimerCreate").writes == [0, 2]
     assert rb.owned("cfe/modules/sb/fsw/src/cfe_sb_api.c") and not rb.owned("apps/sample_app/fsw/src/sample_app.c")
 
+    # the v*printf family consumes the caller's va_list (C11 7.21.6.8)
+    assert m.lookup("vsnprintf").writes == [0, 3] and m.lookup("vprintf").writes == [1]
+    # fortified variants insert arguments; indices follow them
+    assert m.lookup("__vsnprintf_chk").writes == [0, 5]  # (s, maxlen, flag, slen, fmt, ap)
+    assert m.lookup("__builtin___vsnprintf_chk").writes == [0, 5]
+    assert m.lookup("__fread_chk").writes == [0, 4]  # (ptr, ptrlen, size, n, stream)
+    assert m.lookup("__vfprintf_chk").writes == [3]  # (fp, flag, fmt, ap)
+    assert m.lookup("__memcpy_chk").writes == [0] and m.lookup("__builtin_memcpy").writes == [0]
+    assert m.lookup("__printf_chk").writes == []
+
     cfg["flow"]["models"] = ["builtin:nope"]
     (tmp_path / "weaver.yaml").write_text(yaml.safe_dump(cfg))
     with pytest.raises(ConfigError):

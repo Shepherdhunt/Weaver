@@ -13,16 +13,16 @@
 # Fortified (_chk) and __builtin_ spellings are normalised to these names;
 # fortified variants keep the destination as argument 0.
 schema: weaver.external-models/1
-reviewed: "2026-09-22"
+reviewed: "2026-09-23"
 functions:
   printf:   {writes: [], calls_back: false, assumptions: ["the format contains no %n conversion"]}
   fprintf:  {writes: [], calls_back: false, assumptions: ["the format contains no %n conversion"]}
-  vprintf:  {writes: [], calls_back: false, assumptions: ["the format contains no %n conversion"]}
-  vfprintf: {writes: [], calls_back: false, assumptions: ["the format contains no %n conversion"]}
+  vprintf:  {writes: [1], calls_back: false, assumptions: ["the format contains no %n conversion", "the va_list is consumed: C11 7.21.6.8 leaves it indeterminate after the call (treated as a write)"]}
+  vfprintf: {writes: [2], calls_back: false, assumptions: ["the format contains no %n conversion", "the va_list is consumed: C11 7.21.6.8 leaves it indeterminate after the call (treated as a write)"]}
   sprintf:  {writes: [0], calls_back: false, assumptions: ["the format contains no %n conversion"]}
   snprintf: {writes: [0], calls_back: false, assumptions: ["the format contains no %n conversion"]}
-  vsprintf: {writes: [0], calls_back: false, assumptions: ["the format contains no %n conversion"]}
-  vsnprintf: {writes: [0], calls_back: false, assumptions: ["the format contains no %n conversion"]}
+  vsprintf: {writes: [0, 2], calls_back: false, assumptions: ["the format contains no %n conversion", "the va_list is consumed: C11 7.21.6.8 leaves it indeterminate after the call (treated as a write)"]}
+  vsnprintf: {writes: [0, 3], calls_back: false, assumptions: ["the format contains no %n conversion", "the va_list is consumed: C11 7.21.6.8 leaves it indeterminate after the call (treated as a write)"]}
   puts:     {writes: [], calls_back: false}
   putchar:  {writes: [], calls_back: false}
   fputs:    {writes: [], calls_back: false}

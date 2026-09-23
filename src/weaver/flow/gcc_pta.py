@@ -361,7 +361,8 @@ class GccPta:
         ``yes`` only for a named object in both the parameter's points-to set and the call's
         clobber set: a write GCC traced to that object.  When the overlap goes through memory
         GCC does not track (``NONLOCAL``, ``ESCAPED``: what external code such as the C library
-        may write, which GCC has no model of), the answer is ``unknown``, not ``yes``.
+        may write, which GCC has no model of), the answer is ``unknown``, not ``yes``.  ``STRING``
+        (string literals) in both sets is not a write: no defined execution modifies a literal.
         """
         img = f"GCC ({self.image})"
         f = self.functions.get(function)
