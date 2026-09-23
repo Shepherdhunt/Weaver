@@ -268,10 +268,12 @@ def _designator_text(d: dict[str, Any] | None) -> str:
 
 def describe_use(use: Use) -> str:
     """Human-readable description of a use (no AST-internal identifiers)."""
-    d = use.detail or {}
-    k = use.kind
+    return describe_use_parts(use.kind, use.access, use.detail or {})
+
+
+def describe_use_parts(k: str, access: str | None, d: dict[str, Any]) -> str:
     if k in ("deref", "arrow", "subscript"):
-        return f"{k} ({use.access})"
+        return f"{k} ({access})"
     if k == "call-arg":
         callee = d.get("callee")
         return f"passed as argument {d.get('arg', 0) + 1} to " + (f"{callee}()" if callee else "an indirect call")

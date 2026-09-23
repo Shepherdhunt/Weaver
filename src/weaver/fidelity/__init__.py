@@ -4,7 +4,10 @@ For a profile whose production compiler is not Clang, Weaver parses the source
 with a separately labelled Clang frontend.  Before that evidence may support a
 rewrite, each unit is compared with the production compiler on:
 
-* final macro definitions that project code can observe,
+* final macro definitions that project code can observe (secondary-only
+  wrappers that forward every argument unchanged to the fortified variant of
+  the same library function are recorded, not counted; see
+  ``weaver.frontend.wrappers``),
 * the set of included project and SDK headers,
 * the conditional branches active in each project file, and
 * representative ABI/layout probes (sizes, alignments, member offsets, char
@@ -30,7 +33,8 @@ from weaver.config import Profile, Project
 from weaver.evidence import EvidenceStatus
 from weaver.fidelity.layout import layout_probe
 from weaver.frontend.lexer import lex
-from weaver.frontend.preproc import active_lines
+from weaver.frontend.preproc import active_lines, conditional_segments
+from weaver.frontend.wrappers import transparent_wrappers
 from weaver.store import Store
 from weaver.toolchain.collect import MANIFEST, parse_depfile, read_macros
 from weaver.util import is_within, now_iso, read_json, rel_or_abs, write_json
@@ -140,19 +144,30 @@ def check_unit(project: Project, profile: Profile, m: dict[str, Any], idents: _I
 
     # 2. macros
     pm, sm = read_macros(udir / "unit.macros.txt"), read_macros(udir / "secondary.macros.txt")
-    diff_relevant, diff_other = [], []
+    wrappers = transparent_wrappers(pm, sm) if pm and sm else {}
+    diff_relevant, diff_other, forwarding = [], [], []
     for name in sorted(set(pm) | set(sm)):
         a, b = pm.get(name), sm.get(name)
         if a == b:
             continue
         desc = f"{name}: production={a!r} secondary={b!r}"
+        if name in wrappers:
+            if name in visible:
+                forwarding.append(f"{name} -> {wrappers[name]}")
+            continue
         if name in visible:
             diff_relevant.append(desc)
         elif not name.startswith(IDENTITY_PREFIXES):
             diff_other.append(desc)
     findings += [f"macro observable by project code differs: {d}" for d in diff_relevant]
+    if forwarding:
+        notes.append(
+            "secondary-only forwarding wrappers (every argument passed once, unchanged, to the fortified "
+            f"variant of the same library function; arguments read as plain source text): {', '.join(forwarding)}"
+        )
     rec["macro_differences"] = {
         "relevant": diff_relevant,
+        "forwarding": forwarding,
         "not_referenced": diff_other[:200],
         "not_referenced_count": len(diff_other),
     }
@@ -185,10 +200,22 @@ def check_unit(project: Project, profile: Profile, m: dict[str, Any], idents: _I
             if f.startswith("<") or not is_within(f, root):
                 continue
             a, b = pa.get(f, set()), sa.get(f, set())
-            if a != b:
-                only_p, only_s = sorted(a - b)[:12], sorted(b - a)[:12]
+            if a == b:
+                continue
+            try:
+                segs = conditional_segments(f)
+            except OSError:
+                segs = [(ln, ln) for ln in sorted(a | b)]
+            only_p, only_s = [], []
+            for lo, hi in segs:
+                in_a = any(lo <= ln <= hi for ln in a)
+                in_b = any(lo <= ln <= hi for ln in b)
+                if in_a != in_b:
+                    (only_p if in_a else only_s).append(f"{lo}-{hi}" if hi > lo else str(lo))
+            if only_p or only_s:
                 findings.append(
-                    f"active lines differ in {rel_or_abs(f, root)}: only production {only_p}, only secondary {only_s}"
+                    f"active conditional groups differ in {rel_or_abs(f, root)}: only production lines "
+                    f"{only_p[:12]}, only secondary lines {only_s[:12]}"
                 )
     else:
         findings.append("preprocessed output missing; active-branch comparison not performed")

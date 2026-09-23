@@ -156,6 +156,49 @@ class RecipeContext:
     def evidence_ok(self, status: str) -> bool:
         return EVIDENCE_RANK[EvidenceStatus(status)] >= EVIDENCE_RANK[self.min_evidence]
 
+    # -- whole-program views ------------------------------------------------
+    @property
+    def program(self) -> Any:
+        if not hasattr(self, "_program"):
+            from weaver.flow.models import load_models
+            from weaver.flow.program import Program
+
+            self._program = Program(self.inventory, load_models(self.project))
+        return self._program
+
+    def flow(self, profile_id: str) -> Any:
+        if not hasattr(self, "_flows"):
+            self._flows: dict[str, Any] = {}
+        if profile_id not in self._flows:
+            from weaver.flow.evidence import load_flow
+
+            self._flows[profile_id] = load_flow(self.project, profile_id, self.inventory)
+        return self._flows[profile_id]
+
+    def whole_program(self) -> list[tuple[str, str]]:
+        """Problems preventing a whole-program claim: (status, message) pairs."""
+        from weaver.capture.compdb import load_compdb
+        from weaver.errors import WeaverError
+
+        out: list[tuple[str, str]] = []
+        analysed = {(u["profile"], u["unit_id"]): u for u in self.inventory["units"]}
+        for p in self.project.profiles:
+            try:
+                cmds = load_compdb(p.compile_commands)
+            except WeaverError as e:
+                out.append((UNRESOLVED, f"profile {p.id}: {e}"))
+                continue
+            for c in cmds:
+                u = analysed.get((p.id, c.unit_id(p.id)))
+                rel = os.path.relpath(c.file, self.root)
+                if u is None:
+                    out.append((UNRESOLVED, f"profile {p.id}: {rel} was not analysed"))
+                elif not u["analyzed"]:
+                    out.append((UNRESOLVED, f"profile {p.id}: {rel} has no AST evidence"))
+                elif not self.evidence_ok(u["evidence_status"]):
+                    out.append((UNRESOLVED, f"profile {p.id}: {rel} evidence is {u['evidence_status']}"))
+        return out
+
     def profiles_compiling(self, rel: str) -> dict[str, bool]:
         """Profile id -> whether its compile database lists ``rel`` (None-safe)."""
         from weaver.capture.compdb import load_compdb
@@ -186,7 +229,12 @@ class Recipe:
         raise NotImplementedError
 
     def recheck(  # pragma: no cover
-        self, result: dict[str, Any], tu: TranslationUnit, offset_map: Any, root: str
-    ) -> list[str]:
-        """Mechanically re-check a patched unit; return a list of problems (empty = passed)."""
+        self, result: dict[str, Any], tu: TranslationUnit, offset_maps: dict[str, Any], root: str
+    ) -> list[str] | None:
+        """Mechanically re-check a patched unit.
+
+        ``offset_maps`` maps each edited project-relative file to its OffsetMap.
+        Returns problems (empty list = passed) or None when the unit is not
+        relevant to this transaction.
+        """
         raise NotImplementedError

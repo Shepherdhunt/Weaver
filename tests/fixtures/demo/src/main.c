@@ -1,6 +1,7 @@
 #include <stdio.h>
 #include "alias.h"
 #include "edge.h"
+#include "params.h"
 #include "util.h"
 
 int main(void)
@@ -27,5 +28,23 @@ int main(void)
     printf("goto=%d,%d\n", e_goto(0), e_goto(1));
     x = e_cleanup();
     printf("cleanup=%d after=%d\n", x, e_cleanup_target);
+    {
+        int k = 3, w = 5;
+        long la = 4, lb = 6;
+        int *kp = &k;
+        printf("scale=%d sum2=%ld\n", p_scale(&k, 7), p_sum2(&la, &lb));
+        int t1 = p_read_after_touch(&w, &w);
+        int t2 = p_read_after_touch(&k, &w);
+        int s1 = p_snapshot(&p_counter);
+        printf("touch=%d,%d\n", t1, t2);
+        printf("snapshot=%d counter=%d\n", s1, p_counter);
+        printf("maybe=%d,%d cond=%d,%d\n", p_maybe(&k), p_maybe(0), p_cond(1, &k), p_cond(0, 0));
+        p_set(&w);
+        printf("set=%d hook=%d\n", w, p_hook(&k));
+        w = p_pair(&w, w++);
+        t1 = p_noisy(&k);
+        t2 = p_via_ptr(kp);
+        printf("pair=%d noisy=%d via=%d\n", w, t1, t2);
+    }
     return 0;
 }

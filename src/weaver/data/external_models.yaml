@@ -1,0 +1,56 @@
+# Reviewed pointer-effect models for common C library functions.
+#
+# Weaver treats any call to a function it has not analysed as an UNKNOWN effect
+# unless a reviewed model exists (artifact plan §12: "Supply actual code or
+# reviewed pointer-effect models for external services...").  Fields:
+#
+#   writes:      argument indices (0-based) whose pointed-to objects the call may
+#                write; "any" means it may write any object reachable by the program.
+#   calls_back:  true if the call may run program code (callbacks, atexit
+#                handlers, signal handlers), whose effects are then unknown here.
+#   assumptions: conditions under which the model holds; recorded as evidence.
+#
+# Fortified (_chk) and __builtin_ spellings are normalised to these names;
+# fortified variants keep the destination as argument 0.
+schema: weaver.external-models/1
+reviewed: "2026-09-22"
+functions:
+  printf:   {writes: [], calls_back: false, assumptions: ["the format contains no %n conversion"]}
+  fprintf:  {writes: [], calls_back: false, assumptions: ["the format contains no %n conversion"]}
+  vprintf:  {writes: [], calls_back: false, assumptions: ["the format contains no %n conversion"]}
+  vfprintf: {writes: [], calls_back: false, assumptions: ["the format contains no %n conversion"]}
+  sprintf:  {writes: [0], calls_back: false, assumptions: ["the format contains no %n conversion"]}
+  snprintf: {writes: [0], calls_back: false, assumptions: ["the format contains no %n conversion"]}
+  vsprintf: {writes: [0], calls_back: false, assumptions: ["the format contains no %n conversion"]}
+  vsnprintf: {writes: [0], calls_back: false, assumptions: ["the format contains no %n conversion"]}
+  puts:     {writes: [], calls_back: false}
+  putchar:  {writes: [], calls_back: false}
+  fputs:    {writes: [], calls_back: false}
+  fputc:    {writes: [], calls_back: false}
+  fflush:   {writes: [], calls_back: false}
+  memcpy:   {writes: [0], calls_back: false}
+  memmove:  {writes: [0], calls_back: false}
+  memset:   {writes: [0], calls_back: false}
+  strcpy:   {writes: [0], calls_back: false}
+  strncpy:  {writes: [0], calls_back: false}
+  strcat:   {writes: [0], calls_back: false}
+  strncat:  {writes: [0], calls_back: false}
+  memcmp:   {writes: [], calls_back: false}
+  strlen:   {writes: [], calls_back: false}
+  strnlen:  {writes: [], calls_back: false}
+  strcmp:   {writes: [], calls_back: false}
+  strncmp:  {writes: [], calls_back: false}
+  strchr:   {writes: [], calls_back: false}
+  strrchr:  {writes: [], calls_back: false}
+  strstr:   {writes: [], calls_back: false}
+  malloc:   {writes: [], calls_back: false}
+  calloc:   {writes: [], calls_back: false}
+  realloc:  {writes: [0], calls_back: false, assumptions: ["the old block is invalidated (treated as a write)"]}
+  free:     {writes: [0], calls_back: false, assumptions: ["releasing an object is treated as a write"]}
+  abs:      {writes: [], calls_back: false}
+  labs:     {writes: [], calls_back: false}
+  llabs:    {writes: [], calls_back: false}
+  exit:     {writes: [], calls_back: true, assumptions: ["atexit handlers may run"]}
+  abort:    {writes: [], calls_back: true, assumptions: ["signal handlers may run"]}
+  qsort:    {writes: [0], calls_back: true}
+  bsearch:  {writes: [], calls_back: true}

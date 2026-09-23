@@ -74,6 +74,19 @@ class SecondaryFrontend:
 
 
 @dataclass
+class CaptureSpec:
+    """How to rebuild the project through recording shims (``capture:`` in a profile).
+
+    ``tools`` maps placeholder names to real executables, e.g. ``{cc: gcc}``;
+    ``command`` may reference ``{cc}`` (replaced by the shim path) and ``{root}``.
+    """
+
+    command: CommandSpec
+    tools: dict[str, str] = field(default_factory=lambda: {"cc": "cc"})
+    clean: CommandSpec | None = None
+
+
+@dataclass
 class Profile:
     id: str
     compile_commands: Path
@@ -84,6 +97,7 @@ class Profile:
     secondary_frontend: SecondaryFrontend | None = None
     recipes: list[str] | str = "default"
     validation: ValidationSpec = field(default_factory=ValidationSpec)
+    capture: CaptureSpec | None = None
 
 
 @dataclass
@@ -92,6 +106,21 @@ class AcceptancePolicy:
     allow_provisional: bool = False
     # Minimum evidence status a candidate's source facts must have.
     min_evidence: str = "secondary-checked"
+
+
+@dataclass
+class FlowConfig:
+    """Flow-evidence settings (``flow:`` in weaver.yaml)."""
+
+    svf_enabled: bool = True
+    wpa: str | None = None  # explicit path to SVF's wpa; default: pysvf's bundled binary, then PATH
+    timeout: float = 900.0
+    memory_mb: int = 8192
+    # Andersen with field-insensitive objects: fields are merged into their base object,
+    # so a write to any part of an object is seen by queries about any other part.
+    options: list[str] = field(default_factory=lambda: ["-ander", "-field-limit=0"])
+    model_files: list[Path] = field(default_factory=list)
+    externals: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -106,6 +135,8 @@ class Project:
     clite: dict[str, Any]
     acceptance: AcceptancePolicy
     raw: dict[str, Any]
+    flow: FlowConfig = field(default_factory=FlowConfig)
+    contracts_path: Path | None = None
 
     def profile(self, pid: str) -> Profile:
         for p in self.profiles:
@@ -167,8 +198,28 @@ def load_project(path: str | os.PathLike[str] | None = None) -> Project:
             tests=[CommandSpec.parse(t, f"test{j}") for j, t in enumerate(val.get("tests") or [])],
             compare=[CommandSpec.parse(t, f"compare{j}") for j, t in enumerate(val.get("compare") or [])],
         )
+        cap = pr.get("capture")
+        capture = None
+        if cap:
+            cmd = CommandSpec.parse(cap.get("command") if isinstance(cap, dict) else cap, "capture")
+            if cmd.cwd == "{workspace}":
+                cmd.cwd = "{root}"
+            clean = None
+            if isinstance(cap, dict) and cap.get("clean"):
+                clean = CommandSpec.parse(cap["clean"], "clean")
+                if clean.cwd == "{workspace}":
+                    clean.cwd = "{root}"
+            capture = CaptureSpec(
+                command=cmd,
+                clean=clean,
+                tools={
+                    str(k): str(v)
+                    for k, v in ((cap.get("tools") if isinstance(cap, dict) else None) or {"cc": "cc"}).items()
+                },
+            )
         profiles.append(
             Profile(
+                capture=capture,
                 id=pid,
                 compile_commands=(base / pr["compile_commands"]).resolve(),
                 description=str(pr.get("description", "")),
@@ -186,7 +237,20 @@ def load_project(path: str | os.PathLike[str] | None = None) -> Project:
         allow_provisional=bool(acc.get("allow_provisional", False)),
         min_evidence=str(acc.get("min_evidence", "secondary-checked")),
     )
+    fl = raw.get("flow") or {}
+    svf = fl.get("svf") or {}
+    flow = FlowConfig(
+        svf_enabled=bool(svf.get("enabled", True)),
+        wpa=str(svf["wpa"]) if svf.get("wpa") else None,
+        timeout=float(svf.get("timeout", 900.0)),
+        memory_mb=int(svf.get("memory_mb", 8192)),
+        options=[str(o) for o in svf.get("options", ["-ander", "-field-limit=0"])],
+        model_files=[(base / m).resolve() for m in fl.get("models", [])],
+        externals=dict(fl.get("externals") or {}),
+    )
     return Project(
+        flow=flow,
+        contracts_path=(base / proj.get("contracts", "weaver-contracts.yaml")).resolve(),
         config_path=cfg_path,
         name=str(proj.get("name", root.name)),
         root=root,

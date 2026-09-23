@@ -47,3 +47,27 @@ def active_lines(i_path: str | os.PathLike[str], directory: str) -> dict[str, se
                 out.setdefault(cur_file, set()).add(cur_line)
             cur_line += 1
     return out
+
+
+def conditional_segments(path: str | os.PathLike[str]) -> list[tuple[int, int]]:
+    """Maximal line ranges [first, last] of a file whose activity cannot differ internally.
+
+    Whether a line is compiled can only change at a conditional directive, so
+    the lines between consecutive conditional directives are all active or all
+    inactive.  Comparing frontends per segment (rather than per line) ignores
+    how each one lays out macro expansions in its preprocessed output.
+    """
+    from weaver.frontend.lexer import lex
+
+    lx = lex(Path(path).read_bytes())
+    last = len(lx.line_starts) - (1 if lx.text.endswith("\n") else 0)
+    out: list[tuple[int, int]] = []
+    start = 1
+    for d in lx.directives:
+        if d.is_conditional:
+            if d.line_start > start:
+                out.append((start, d.line_start - 1))
+            start = d.line_end + 1
+    if start <= last:
+        out.append((start, last))
+    return out

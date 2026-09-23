@@ -14,6 +14,7 @@ Typical flow (see README):
     weaver validate T-xxxxxxxx
     weaver accept T-xxxxxxxx                         # or: skip / revert
     weaver refresh
+    weaver serve                                     # the same workflow in a local web interface
 """
 
 from __future__ import annotations
@@ -150,6 +151,33 @@ def cmd_fidelity(args: argparse.Namespace) -> int:
             for f in u.get("findings", [])[:8]:
                 print(f"      - {f}")
     return 0
+
+
+def cmd_flow(args: argparse.Namespace) -> int:
+    from weaver.flow.svf import run_flow
+
+    proj = _project(args)
+    rc = 0
+    for prof in proj.select_profiles(args.profile):
+        res = run_flow(proj, prof, force=args.force)
+        if args.json:
+            _print_json(res)
+            continue
+        diag = res.get("diagnostics") or {}
+        print(
+            f"profile {prof.id}: flow evidence {res['status']}"
+            + (f" ({res['reason']})" if res.get("reason") else "")
+            + (
+                f"; {diag.get('nodes')} pointer node(s), {diag.get('objects')} object(s), "
+                f"{diag.get('indirect_call_sites')} indirect call site(s)"
+                if diag
+                else ""
+            )
+        )
+        for m in res.get("missing_units", []):
+            print(f"  missing: {m['file']}: {m['reason']}")
+        rc |= 0 if res["status"] == "complete" else 1
+    return rc
 
 
 def cmd_inventory(args: argparse.Namespace) -> int:
@@ -368,18 +396,74 @@ def cmd_ledger(args: argparse.Namespace) -> int:
 
 
 def cmd_refresh(args: argparse.Namespace) -> int:
-    from weaver.analysis.inventory import build_inventory
-    from weaver.toolchain.collect import collect_profile
+    from weaver.pipeline import refresh
 
     proj = _project(args)
-    for prof in proj.select_profiles(args.profile):
-        res = collect_profile(proj, prof, files=args.file, jobs=args.jobs)
-        print(
-            f"profile {prof.id}: {res['collected']} re-collected, {res['cached']} unchanged, "
-            f"{len(res['failed'])} failed"
+    refresh(proj, jobs=args.jobs, flow=False if args.no_flow else None, capture=args.capture)
+    return 0
+
+
+def cmd_snapshot(args: argparse.Namespace) -> int:
+    from weaver.impact import list_snapshots, save_snapshot, snapshot_from_git
+
+    proj = _project(args)
+    if args.action == "save":
+        m = save_snapshot(proj, args.name)
+        print(f"snapshot {m['name']}: {m['findings']} finding(s) at {m['created_at']}")
+    elif args.action == "git":
+        if not args.rev:
+            raise WeaverError("usage: weaver snapshot git REV [--name NAME]")
+        m = snapshot_from_git(proj, args.rev, args.name)
+        print(f"snapshot {m['name']}: {m['findings']} finding(s) at {m['source']['commit'][:12]}")
+    else:
+        for m in list_snapshots(proj):
+            src = m["source"]
+            print(
+                f"{m['name']:<28} {m['created_at']}  {m['findings']:>5} finding(s)  "
+                f"{src.get('commit', (src.get('revision') or {}).get('commit', ''))[:12]}"
+            )
+    return 0
+
+
+def cmd_impact(args: argparse.Namespace) -> int:
+    from weaver.impact import impact, render_report
+
+    def log(msg: str) -> None:  # progress goes to stderr so --json output stays parseable
+        print(msg, file=sys.stderr if args.json else sys.stdout, flush=True)
+
+    rep = impact(_project(args), args.since, revalidate=args.revalidate, log=log if args.revalidate else None)
+    if args.json:
+        _print_json(rep)
+    else:
+        print(render_report(rep))
+    if args.command == "check":
+        return 1 if rep["risk"] == "high" else 0
+    return 0
+
+
+def cmd_contract(args: argparse.Namespace) -> int:
+    from weaver.impact import EXPECTATIONS, load_contracts, pin_contract
+
+    proj = _project(args)
+    if args.action == "pin":
+        if not args.finding or not args.expect:
+            raise WeaverError("usage: weaver contract pin FINDING --expect read-only[,no-escape...]")
+        c = pin_contract(
+            proj, args.finding, [e.strip() for e in args.expect.split(",") if e.strip()], args.reason or ""
         )
-    inv = build_inventory(proj, jobs=args.jobs)
-    print(f"inventory: {inv['summary']['findings']} finding(s)")
+        print(
+            f"{c['id']}: {c['subject']['name']} in {c['subject']['function']}() must stay {', '.join(c['expect'])}"
+            f" (recorded in {proj.contracts_path})"
+        )
+    else:
+        for c in load_contracts(proj):
+            print(
+                f"{c['id']}  {c['finding']}  {c['subject'].get('name')} in {c['subject'].get('function')}(): "
+                f"{', '.join(c['expect'])}  {c.get('reason') or ''}"
+            )
+        if args.action == "expectations":
+            for k, v in EXPECTATIONS.items():
+                print(f"  {k:<16} {v}")
     return 0
 
 
@@ -419,9 +503,8 @@ def cmd_explain(args: argparse.Namespace) -> int:
 
 
 def cmd_auto(args: argparse.Namespace) -> int:
-    from weaver.analysis.inventory import build_inventory
     from weaver.ledger import Ledger
-    from weaver.toolchain.collect import collect_profile
+    from weaver.pipeline import refresh
 
     proj = _project(args)
     led = Ledger(proj)
@@ -432,10 +515,10 @@ def cmd_auto(args: argparse.Namespace) -> int:
         if not results:
             print("no further eligible candidates")
             break
-        f, _r = min(results, key=lambda x: (len(x[1].edits), x[0]["file"], x[0]["line"]))
+        f, r = min(results, key=lambda x: (len(x[1].edits), x[0]["file"], x[0]["line"]))
         done.add(f["id"])
-        txn = led.propose(f["id"], args.recipe)
-        print(f"{txn['id']} {f['id']} {f['file']}:{f['line']} '{f['name']}': {txn['state']}")
+        txn = led.propose(f["id"], r.recipe)
+        print(f"{txn['id']} {r.recipe} {f['id']} {f['file']}:{f['line']} '{f['name']}': {txn['state']}")
         if txn["state"] != "proposed" or args.dry_run:
             continue
         txn = led.validate(txn["id"])
@@ -443,13 +526,22 @@ def cmd_auto(args: argparse.Namespace) -> int:
         if txn["state"] == "validated" or (txn["state"] == "provisional" and proj.acceptance.allow_provisional):
             led.accept(txn["id"])
             accepted += 1
-            print("  accepted; re-analysing affected evidence")
-            for prof in proj.profiles:
-                collect_profile(proj, prof, files=[str(proj.root / x) for x in txn["candidate"]["affected"]["files"]])
-            build_inventory(proj)
+            print("  accepted; re-analysing")
+            refresh(proj, log=lambda m: print("    " + m))
         else:
             led.skip(txn["id"], f"auto: validation {txn['state']}")
     print(f"accepted {accepted} transaction(s)")
+    return 0
+
+
+def cmd_serve(args: argparse.Namespace) -> int:
+    from weaver.config import CONFIG_NAME
+    from weaver.web.server import serve
+
+    path = args.project or args.config
+    if path is None and Path(CONFIG_NAME).exists():
+        path = "."
+    serve(path, host=args.host, port=args.port, open_browser=args.open)
     return 0
 
 
@@ -493,6 +585,11 @@ def build_parser() -> argparse.ArgumentParser:
     sp = add("fidelity", cmd_fidelity, "check a secondary Clang frontend against the production compiler")
     profiles(sp)
     sp.add_argument("--no-layout", action="store_true", help="skip ABI/layout probes")
+    sp.add_argument("--json", action="store_true")
+
+    sp = add("flow", cmd_flow, "run SVF points-to analysis as a separate job and record flow evidence")
+    profiles(sp)
+    sp.add_argument("--force", action="store_true", help="rebuild bitcode even if cached")
     sp.add_argument("--json", action="store_true")
 
     sp = add("inventory", cmd_inventory, "build the pointer inventory from collected evidence")
@@ -543,10 +640,30 @@ def build_parser() -> argparse.ArgumentParser:
     sp = add("ledger", cmd_ledger, "list transactions")
     sp.add_argument("--json", action="store_true", help="print the raw event log")
 
-    sp = add("refresh", cmd_refresh, "re-collect changed units and rebuild the inventory")
-    profiles(sp)
-    sp.add_argument("--file", action="append")
+    sp = add("refresh", cmd_refresh, "re-collect changed units, re-check fidelity, rebuild inventory and flow")
     sp.add_argument("-j", "--jobs", type=int)
+    sp.add_argument("--no-flow", action="store_true", help="skip the SVF flow job")
+    sp.add_argument("--capture", action="store_true", help="first rebuild through capture shims (profile 'capture')")
+
+    sp = add("snapshot", cmd_snapshot, "save a baseline of pointer facts (working tree or a git revision)")
+    sp.add_argument("action", choices=["save", "git", "list"])
+    sp.add_argument("rev", nargs="?", help="git revision (for 'git')")
+    sp.add_argument("--name")
+
+    for name, help_ in (
+        ("impact", "explain how pointer behavior changed since a snapshot"),
+        ("check", "like impact, but exit 1 on high-risk changes (for CI)"),
+    ):
+        sp = add(name, cmd_impact, help_)
+        sp.add_argument("--since", required=True, help="snapshot name")
+        sp.add_argument("--revalidate", action="store_true", help="also run builds/tests/comparisons on both trees")
+        sp.add_argument("--json", action="store_true")
+
+    sp = add("contract", cmd_contract, "pin expected pointer behavior (checked by impact/check)")
+    sp.add_argument("action", choices=["pin", "list", "expectations"])
+    sp.add_argument("finding", nargs="?")
+    sp.add_argument("--expect", help="comma-separated: read-only, no-escape, no-identity, no-reassign, not-null-tested")
+    sp.add_argument("--reason")
 
     sp = add("graph", cmd_graph, "export the normalized evidence graph")
     sp.add_argument("-o", "--output")
@@ -564,8 +681,14 @@ def build_parser() -> argparse.ArgumentParser:
         help="do not request server-side refusal fallbacks (e.g. on platforms without them)",
     )
 
+    sp = add("serve", cmd_serve, "start the local web interface")
+    sp.add_argument("project", nargs="?", help="project directory or weaver.yaml to open (default: -C or cwd)")
+    sp.add_argument("--host", default="127.0.0.1", help="bind address (default: loopback only)")
+    sp.add_argument("--port", type=int, default=8765)
+    sp.add_argument("--open", action="store_true", help="open a browser")
+
     sp = add("auto", cmd_auto, "propose/validate/accept eligible candidates under the acceptance policy")
-    sp.add_argument("--recipe", default="local-alias")
+    sp.add_argument("--recipe", help="restrict to one recipe (default: all)")
     sp.add_argument("--max", type=int, default=10)
     sp.add_argument("--dry-run", action="store_true", help="propose only")
     return p

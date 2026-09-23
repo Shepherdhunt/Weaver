@@ -230,6 +230,29 @@ def _b_bc(cc: str, opts: list[str], src: str, out: Path, stem: str) -> Invocatio
     return Invocation([cc, *opts, "-g", "-fno-discard-value-names", "-c", "-emit-llvm", src, "-o", str(o)], [o])
 
 
+def _b_flow_bc(cc: str, opts: list[str], src: str, out: Path, stem: str) -> Invocation:
+    # Frontend IR before LLVM passes (artifact plan §4): production -O options still
+    # select preprocessing and frontend behaviour, while loads/stores of named
+    # locals keep their debug locations for source mapping.
+    o = out / f"{stem}.flow.bc"
+    return Invocation(
+        [
+            cc,
+            *opts,
+            "-g",
+            "-fno-discard-value-names",
+            "-Xclang",
+            "-disable-llvm-passes",
+            "-c",
+            "-emit-llvm",
+            src,
+            "-o",
+            str(o),
+        ],
+        [o],
+    )
+
+
 def _b_layouts(cc: str, opts: list[str], src: str, out: Path, stem: str) -> Invocation:
     o = out / f"{stem}.layouts.txt"
     return Invocation([cc, *opts, "-fsyntax-only", "-Xclang", "-fdump-record-layouts-complete", src], [o], stdout_to=o)
@@ -361,6 +384,17 @@ RECIPES: dict[str, Recipe] = {
             False,
             CLANG_DRIVER_DOC,
             _b_bc,
+            _check_bc,
+        ),
+        Recipe(
+            "flow_bitcode",
+            ("clang",),
+            "frontend LLVM bitcode for points-to analysis (SVF)",
+            False,
+            ["-g", "-fno-discard-value-names", "-Xclang -disable-llvm-passes"],
+            True,
+            CLANG_DRIVER_DOC,
+            _b_flow_bc,
             _check_bc,
         ),
         Recipe(

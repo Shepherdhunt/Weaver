@@ -58,8 +58,10 @@ NO_LOC = Loc(None, None, None, None, None)
 
 
 class _LocResolver:
-    def __init__(self, directory: str):
+    def __init__(self, directory: str, unwrap: Any = None):
         self.directory = directory
+        self.unwrap = unwrap  # weaver.frontend.wrappers.ArgUnwrapper or None
+        self.unwrapped = 0
         self.last_file: str | None = None
         self.last_line: int | None = None
         self._cache: dict[str, str] = {}
@@ -96,6 +98,16 @@ class _LocResolver:
         if "spellingLoc" in d or "expansionLoc" in d:
             sp = self.bare(d.get("spellingLoc") or {})
             ex = self.bare(d.get("expansionLoc") or {})
+            if (
+                self.unwrap is not None
+                and ex.macro_arg
+                and sp.valid
+                and sp.file == ex.file
+                and self.unwrap.plain(ex.file, ex.offset, sp.offset)
+            ):
+                # an argument of a transparent secondary-only wrapper (see frontend.wrappers)
+                self.unwrapped += 1
+                return Loc(sp.file, sp.line, sp.col, sp.offset, sp.tok_len)
             return Loc(
                 ex.file, ex.line, ex.col, ex.offset, ex.tok_len, spelling=sp, expansion=ex, macro_arg=ex.macro_arg
             )
@@ -224,6 +236,7 @@ class TranslationUnit:
         directory: str,
         main_file: str,
         keep_root: str | os.PathLike[str] | None = None,
+        unwrap: Any = None,
     ):
         raw = read_json(ast_path)
         if raw.get("kind") != "TranslationUnitDecl":
@@ -235,7 +248,7 @@ class TranslationUnit:
         self.typedefs: dict[str, str] = {}  # name -> canonical (desugared) type string
         self.typedef_decls: dict[str, dict[str, Any]] = {}
         self.decl_files: dict[str, str | None] = {}  # every decl id -> file (for referencedDecl lookups)
-        res = _LocResolver(directory)
+        res = _LocResolver(directory, unwrap)
         for i, top in enumerate(raw.get("inner", [])):
             if not isinstance(top, dict):
                 continue
@@ -252,6 +265,8 @@ class TranslationUnit:
                 for n in node.walk():
                     if n is not node:
                         self.nodes.pop(n.id, None)
+        self.transparent_macros = sorted(unwrap.wrappers) if unwrap is not None else []
+        self.unwrapped_locations = res.unwrapped
 
     def _keep(self, f: str | None) -> bool:
         if f is None:
@@ -359,4 +374,6 @@ def load_unit_ast(manifest: dict[str, Any], unit_dir: Path, keep_root: str | Non
         return None
     art = manifest["artifacts"][key]
     path = unit_dir / art["files"][0]["path"]
-    return TranslationUnit(path, manifest["directory"], manifest["file"], keep_root)
+    from weaver.frontend.wrappers import unwrapper_for
+
+    return TranslationUnit(path, manifest["directory"], manifest["file"], keep_root, unwrapper_for(manifest, unit_dir))

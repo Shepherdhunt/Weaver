@@ -1,0 +1,207 @@
+"""The local web interface: request guards, view models, and the workflow driven through jobs."""
+
+from __future__ import annotations
+
+import http.client
+import json
+import re
+import shutil
+import threading
+import time
+
+import pytest
+import yaml
+from conftest import FIXTURE, SINGLE_THREADED, build_project, needs_clang, run_cli, validation_for
+from test_pipeline import finding_id
+
+from weaver.web.server import App, make_server
+
+
+class Client:
+    def __init__(self, app: App):
+        self.app = app
+        self.httpd = make_server(app, "127.0.0.1", 0)
+        self.port = self.httpd.server_address[1]
+        self.thread = threading.Thread(target=self.httpd.serve_forever, daemon=True)
+        self.thread.start()
+
+    def close(self) -> None:
+        self.httpd.shutdown()
+        self.httpd.server_close()
+
+    def raw(self, method, path, body=None, headers=None):
+        conn = http.client.HTTPConnection("127.0.0.1", self.port, timeout=60)
+        h = {"Host": f"127.0.0.1:{self.port}"}
+        h.update(headers or {})
+        data = None
+        if body is not None:
+            data = body if isinstance(body, bytes) else json.dumps(body).encode()
+            h.setdefault("Content-Type", "application/json")
+        conn.request(method, path, body=data, headers=h)
+        r = conn.getresponse()
+        out = r.status, dict(r.getheaders()), r.read()
+        conn.close()
+        return out
+
+    def api(self, path, body=None, status=200):
+        st, _, data = self.raw(
+            "POST" if body is not None else "GET", "/api/" + path, body, {"X-Weaver-Token": self.app.token}
+        )
+        assert st == status, (st, data[:500])
+        return json.loads(data)
+
+    def wait(self, job, timeout=300):
+        t0 = time.time()
+        while time.time() - t0 < timeout:
+            j = self.api(f"jobs/{job['id']}")
+            if j["state"] != "running":
+                assert j["state"] == "done", (j["error"], j["log"][-20:])
+                return j
+            time.sleep(0.2)
+        raise TimeoutError(job)
+
+
+@pytest.fixture(scope="module")
+def analysed(tmp_path_factory):
+    root = build_project(
+        tmp_path_factory.mktemp("web"),
+        [{"id": "clang", "cc": "clang", "validation": validation_for("clang")}],
+        extra={
+            "preservation": SINGLE_THREADED,
+            "acceptance": {"require": ["compile", "mechanical-recheck", "differential-testing"]},
+        },
+    )
+    assert run_cli(root, "collect") == 0 and run_cli(root, "inventory") == 0
+    return root
+
+
+@pytest.fixture()
+def client(analysed):
+    c = Client(App(str(analysed)))
+    yield c
+    c.close()
+
+
+@needs_clang
+def test_request_guards(client):
+    st, headers, body = client.raw("GET", "/")
+    assert st == 200 and "default-src 'self'" in headers["Content-Security-Policy"]
+    token = re.search(rb'name="weaver-token" content="([^"]+)"', body).group(1).decode()
+    assert token == client.app.token
+    assert client.raw("GET", "/api/state")[0] == 403  # no token
+    assert client.raw("GET", "/api/state", headers={"X-Weaver-Token": "nope"})[0] == 403
+    # DNS rebinding: a foreign Host header is refused even with the token
+    assert client.raw("GET", "/api/state", headers={"X-Weaver-Token": token, "Host": "evil.test"})[0] == 403
+    assert client.raw("GET", "/", headers={"Host": f"evil.test:{client.port}"})[0] == 403
+    # simple (form) POSTs are refused
+    st, _, _ = client.raw("POST", "/api/compile", b"{}", {"X-Weaver-Token": token, "Content-Type": "text/plain"})
+    assert st == 415
+    assert client.raw("GET", "/static/../server.py")[0] == 404
+    client.api("source?file=../../../../etc/passwd", status=404)
+
+
+@needs_clang
+def test_views(client, analysed):
+    st = client.api("state")
+    assert st["project"]["name"] == "demo" and st["inventory"]
+    pl = client.api("pointers")
+    assert len(pl["pointers"]) == 45 and pl["removed"] == []
+    by = {(p["function"], p["name"]): p for p in pl["pointers"]}
+    assert by[("la_basic", "p")]["class"] == "writes" and by[("la_basic", "p")]["recipes"]["local-alias"]["eligible"]
+    assert by[("p_scale", "factor")]["class"] == "read-only"
+    assert by[("la_escape", "ep")]["class"] == "escapes"
+
+    d = client.api("pointer/" + by[("p_scale", "factor")]["id"])
+    assert d["recipes"]["scalar-input"]["eligible"]
+    assert [(a["caller"], a["object"]) for a in d["call_args"]] == [("main", "k")]
+    assert d["uses"][0]["text"] == "deref (read)" and "*factor" in d["uses"][0]["source"]
+
+    m = client.api("map")
+    params = next(f for f in m["files"] if f["file"] == "src/params.c")
+    scale = next(fn for fn in params["functions"] if fn["name"] == "p_scale")
+    assert scale["callers"] == ["src/main.c::main"] and scale["pointers"][0]["eligible"]
+
+    nb = client.api("neighborhood/" + by[("p_sum2", "a")]["id"])
+    assert any(n["type"] == "object" and n["label"] == "la" for n in nb["nodes"])
+    assert any(e["type"] == "calls" for e in nb["edges"])
+
+    src = client.api("source?file=src/alias.c")
+    assert any(mk["name"] == "p" and mk["role"] == "declaration" for mk in src["marks"])
+    assert src["unexamined"]  # the '#ifdef NEVER_DEFINED' branch
+
+
+@needs_clang
+def test_transaction_workflow_through_jobs(tmp_path):
+    root = build_project(
+        tmp_path,
+        [{"id": "clang", "cc": "clang", "validation": validation_for("clang")}],
+        extra={"acceptance": {"require": ["compile", "mechanical-recheck", "differential-testing"]}},
+    )
+    run_cli(root, "collect")
+    run_cli(root, "inventory")
+    c = Client(App(str(root)))
+    try:
+        fid = finding_id(root, "la_basic", "p")
+        t = c.api("propose", {"finding": fid, "recipe": "local-alias"})
+        assert t["state"] == "proposed" and "+    total += 2;" in t["patch"]["diff"] and t["card"]
+        # a second modifying operation is refused while one runs
+        c.app.busy.acquire()
+        try:
+            c.api("compile", {}, status=400)
+        finally:
+            c.app.busy.release()
+        c.wait(c.api(f"txn/{t['id']}/validate", {}))
+        assert c.api(f"ledger/{t['id']}")["state"] == "validated"
+        c.wait(c.api(f"txn/{t['id']}/accept", {}))
+        pl = c.api("pointers")
+        assert fid not in {p["id"] for p in pl["pointers"]}
+        assert [(r["txn"], r["name"]) for r in pl["removed"]] == [(t["id"], "p")]
+        assert "unsigned *p" not in (root / "src/alias.c").read_text()
+
+        # pin, snapshot, edit, compare
+        a = finding_id(root, "la_global", "gp")
+        c.api("contracts", {"finding": a, "expect": ["no-escape"], "reason": "test"})
+        c.api("snapshots", {"name": "base"})
+        alias = root / "src/alias.c"
+        alias.write_text(alias.read_text().replace("    (*gp)++;\n", "    (*gp)++;\n    util_touch(gp);\n", 1))
+        assert c.api("state")["stale_files"] == ["src/alias.c"]
+        c.wait(c.api("compile", {"flow": False}))
+        rep = c.wait(c.api("impact", {"since": "base"}))["result"]
+        assert rep["risk"] == "high"
+        assert any(x["status"] == "violated" for x in rep["contracts"])
+    finally:
+        c.close()
+
+
+@needs_clang
+def test_setup_and_capture_from_the_browser(tmp_path):
+    root = tmp_path / "fresh"
+    shutil.copytree(FIXTURE, root)
+    c = Client(App())
+    try:
+        assert c.api("state")["project"] is None
+        e = c.api("open", {"path": str(root)}, status=409)
+        assert e["needs_setup"]
+        c.api(
+            "setup",
+            {
+                "path": str(root),
+                "build": "make -B CC={cc} BUILD=build/w",
+                "compiler": "clang",
+                "clean": "make clean BUILD=build/w",
+                "run": "./build/w/demo",
+                "concurrency": "single-threaded",
+            },
+        )
+        cfg = yaml.safe_load((root / "weaver.yaml").read_text())
+        prof = cfg["profiles"][0]
+        assert prof["capture"]["command"] == "make -B CC={cc} BUILD=build/w"
+        assert prof["validation"]["build"]["run"] == "make -B CC=clang BUILD=build/w"
+        assert "differential-testing" in cfg["acceptance"]["require"]
+        job = c.wait(c.api("compile", {"flow": False}))
+        assert any("captured 5 compile command(s)" in line for line in job["log"])
+        st = c.api("state")
+        assert st["inventory"] and st["project"]["profiles"][0]["compile_commands_exist"]
+        assert len(c.api("pointers")["pointers"]) == 45
+    finally:
+        c.close()

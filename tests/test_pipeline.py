@@ -45,6 +45,7 @@ BLOCKED = {
     ("e_for_init", "np"): "LA.decl-shape",
     ("e_goto", "gp"): "LA.initialization-dominates",
     ("e_cleanup", "cp"): "LA.decl-shape",
+    ("main", "kp"): "LA.dereference-only",
 }
 
 
@@ -56,11 +57,12 @@ def cli_json(root: Path, *args: str):
     return json.loads(buf.getvalue())
 
 
-def verdicts(root: Path) -> dict[tuple[str, str], list[str]]:
+def verdicts(root: Path, recipe: str = "local-alias") -> dict[tuple[str, str], list[str]]:
+    """(function, name) -> ids of the preconditions not established, for one recipe."""
     inv = load_inventory(load_project(root))
     by_id = {f["id"]: f for f in inv["findings"]}
     out = {}
-    for c in cli_json(root, "candidates"):
+    for c in cli_json(root, "candidates", "--recipe", recipe):
         f = by_id[c["finding"]]
         out[(f["function"], f["name"])] = [p["id"] for p in c["preconditions"] if p["status"] != "established"]
     return out
@@ -83,7 +85,8 @@ def clang_project(tmp_path_factory):
 def test_inventory_and_coverage(clang_project):
     inv = load_inventory(load_project(clang_project))
     kinds = inv["summary"]["by_kind"]
-    assert kinds["local"] == 22 and kinds["parameter"] == 5 and kinds["static-global"] == 1
+    assert kinds["local"] == 23 and kinds["parameter"] == 19 and kinds["static-global"] == 1
+    assert kinds["global"] == 1 and kinds["extern-decl"] == 1  # the function-pointer hook in params
     # Lines inside '#ifdef NEVER_DEFINED' and '#ifdef TRACE' were compiled by no configuration.
     alias = inv["coverage"]["files"]["src/alias.c"]
     lines = (clang_project / "src/alias.c").read_text().splitlines()
@@ -232,8 +235,12 @@ def test_gcc_profile_with_secondary_frontend(tmp_path):
     assert "LA.configurations" in verdicts(root)[("la_basic", "p")]
     fid = cli_json(root, "fidelity")
     status = {u["file"]: u["evidence_status"] for u in fid["units"]}
-    assert status["src/alias.c"] == "secondary-checked"
-    assert status["src/edge.c"] == "secondary-checked"
+    # main.c calls printf: under glibc fortification Clang sees a forwarding macro that GCC does not;
+    # it is recognised as transparent rather than counted as a difference.
+    assert set(status.values()) == {"secondary-checked"}, fid["units"]
+    main = next(u for u in fid["units"] if u["file"] == "src/main.c")
+    for fwd in main["macro_differences"]["forwarding"]:
+        assert fwd.startswith("printf -> ") and "_chk" in fwd
     run_cli(root, "inventory")
     assert verdicts(root)[("la_basic", "p")] == []
 

@@ -17,6 +17,27 @@ needs_clang = pytest.mark.skipif(not (HAVE_CLANG and HAVE_MAKE), reason="clang a
 needs_gcc = pytest.mark.skipif(not (HAVE_CLANG and HAVE_GCC and HAVE_MAKE), reason="gcc, clang and make required")
 
 
+def _have_svf() -> bool:
+    import importlib.util
+
+    spec = importlib.util.find_spec("pysvf")
+    if spec is None or not spec.origin:
+        return False
+    return (Path(spec.origin).resolve().parent / "SVF" / "Release-build" / "bin" / "wpa").exists()
+
+
+HAVE_SVF = _have_svf()
+needs_svf = pytest.mark.skipif(not (HAVE_CLANG and HAVE_MAKE and HAVE_SVF), reason="clang, make and pysvf required")
+
+# Declarations the interface recipe needs beyond the default project settings.
+SINGLE_THREADED = {"behaviors": ["stdout", "exit-status"], "concurrency": "single-threaded"}
+RAND_MODEL = {
+    "externals": {
+        "rand": {"writes": [], "calls_back": False, "assumptions": ["reviewed: rand() only updates its own state"]}
+    }
+}
+
+
 def build_project(tmp: Path, profiles: list[dict], extra: dict | None = None) -> Path:
     """Copy the demo project, capture each profile's build through shims, write weaver.yaml.
 

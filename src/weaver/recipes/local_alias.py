@@ -588,7 +588,9 @@ class LocalAliasRecipe(Recipe):
                         pre.fail(VIOLATED, f"line {n.begin.file_loc.line}: switch label past the initialization")
 
     # ------------------------------------------------------------------
-    def recheck(self, result: dict[str, Any], tu: TranslationUnit, offset_map: OffsetMap, root: str) -> list[str]:
+    def recheck(
+        self, result: dict[str, Any], tu: TranslationUnit, offset_maps: dict[str, OffsetMap], root: str
+    ) -> list[str] | None:
         """Re-parse check on the patched unit (the mechanical part of validation).
 
         ``tu`` is the AST of the patched file, collected from a workspace whose
@@ -597,6 +599,9 @@ class LocalAliasRecipe(Recipe):
         rc = result["recheck"]
         problems: list[str] = []
         main = tu.main_file
+        if rel_or_abs(main, root) != rc["file"] or rc["file"] not in offset_maps:
+            return None  # this unit does not compile the edited function
+        offset_map = offset_maps[rc["file"]]
         name = rc["pointer_name"]
         fn = next((f for f in tu.functions() if f.name == rc.get("function")), None)
         if fn is None:

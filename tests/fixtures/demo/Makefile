@@ -2,7 +2,7 @@
 CC ?= cc
 CFLAGS ?= -O2 -std=c11
 BUILD ?= build
-SRCS := src/main.c src/alias.c src/edge.c src/util.c
+SRCS := src/main.c src/alias.c src/edge.c src/params.c src/util.c
 OBJS := $(SRCS:src/%.c=$(BUILD)/%.o)
 
 $(BUILD)/demo: $(OBJS)

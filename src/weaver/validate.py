@@ -23,6 +23,7 @@ from weaver.capture.toolid import identify
 from weaver.config import Project
 from weaver.evidence import ValidationKind, ValidationOutcome
 from weaver.frontend.clang_ast import TranslationUnit
+from weaver.frontend.wrappers import unwrapper_for
 from weaver.recipes import CATALOG
 from weaver.rewrite import Edit, OffsetMap, apply_edits
 from weaver.store import Store
@@ -146,10 +147,17 @@ def run_validation(project: Project, txn: dict[str, Any], keep: bool = False) ->
             )
             continue
         targets = {os.path.realpath(project.root / f): f for f in affected}
+        offset_maps = {f: OffsetMap([e for e in edits if e.file == f]) for f in affected}
         for c in cmds:
-            rel = targets.get(os.path.realpath(c.file))
-            if rel is None:
-                continue
+            man = _manifest_for(project, prof.id, c)
+            deps = {os.path.realpath(c.file)} | {
+                os.path.realpath(d["path"]) for d in (man or {}).get("dependencies", [])
+            }
+            hit = sorted(targets[t] for t in deps & set(targets))
+            if man is not None and not hit:
+                continue  # neither this unit's source nor anything it includes was edited
+            rel = os.path.relpath(c.file, project.root)
+            name = f"{prof.id}:{rel}#{c.index}"
             bc, cc = base_map.cmd(c), cand_map.cmd(c)
             b = _compile(bc, scratch)
             k = _compile(cc, scratch)
@@ -163,12 +171,13 @@ def run_validation(project: Project, txn: dict[str, Any], keep: bool = False) ->
             else:
                 outcome = ValidationOutcome.PASSED
                 detail = "compiles" + (f"; new diagnostics: {new_diags}" if new_diags else "; no new diagnostics")
+            via = f" (includes {', '.join(h for h in hit if h != rel)})" if any(h != rel for h in hit) else ""
             records.append(
                 _record(
                     ValidationKind.COMPILE,
-                    f"{prof.id}:{rel}#{c.index}",
+                    name,
                     outcome,
-                    detail,
+                    detail + via,
                     profile=prof.id,
                     file=rel,
                     new_diagnostics=new_diags,
@@ -176,12 +185,11 @@ def run_validation(project: Project, txn: dict[str, Any], keep: bool = False) ->
             )
 
             # 2. mechanical re-check on the patched AST ----------------------
-            man = _manifest_for(project, prof.id, c)
             if man is None or not man.get("ast_artifact"):
                 records.append(
                     _record(
                         ValidationKind.MECHANICAL_RECHECK,
-                        f"{prof.id}:{rel}#{c.index}",
+                        name,
                         ValidationOutcome.NOT_EVALUATED,
                         "no AST evidence for this unit",
                         profile=prof.id,
@@ -195,25 +203,30 @@ def run_validation(project: Project, txn: dict[str, Any], keep: bool = False) ->
                 records.append(
                     _record(
                         ValidationKind.MECHANICAL_RECHECK,
-                        f"{prof.id}:{rel}#{c.index}",
+                        name,
                         ValidationOutcome.FAILED,
-                        f"patched file does not parse: {err}",
+                        f"patched unit does not parse: {err}",
                         profile=prof.id,
                         file=rel,
                     )
                 )
                 continue
-            tu = TranslationUnit(ast_path, cc.directory, cc.file, str(cand_ws))
-            file_edits = [e for e in edits if e.file == rel]
-            problems = recipe.recheck(cand, tu, OffsetMap(file_edits), str(cand_ws))
+            tu = TranslationUnit(
+                ast_path,
+                cc.directory,
+                cc.file,
+                str(cand_ws),
+                unwrapper_for(man, store.unit_dir(prof.id, man["unit_id"])),
+            )
+            problems = recipe.recheck(cand, tu, offset_maps, str(cand_ws))
+            if problems is None:
+                continue  # the transaction's facts do not appear in this unit
             records.append(
                 _record(
                     ValidationKind.MECHANICAL_RECHECK,
-                    f"{prof.id}:{rel}#{c.index}",
+                    name,
                     ValidationOutcome.FAILED if problems else ValidationOutcome.PASSED,
-                    "; ".join(problems)
-                    if problems
-                    else "declaration removed; every replaced site resolves to the target",
+                    "; ".join(problems) if problems else "patched AST satisfies the recipe's post-conditions",
                     profile=prof.id,
                     file=rel,
                 )

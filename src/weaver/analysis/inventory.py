@@ -10,12 +10,14 @@ explicit ``unknown`` for later analyses.
 
 from __future__ import annotations
 
+import json
 import os
 from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
 from typing import Any
 
 from weaver import SCHEMA_VERSION
+from weaver.analysis import functions as fn_summaries
 from weaver.analysis.uses import classify_ref
 from weaver.config import Project
 from weaver.evidence import EvidenceStatus
@@ -165,12 +167,25 @@ def analyze_unit(manifest: dict[str, Any], unit_dir: str, root: str) -> dict[str
         "evidence_status": manifest.get("ast_evidence_status", EvidenceStatus.UNSUPPORTED.value),
     }
     if tu is None:
-        return {**base, "analyzed": False, "findings": [], "operations": {}, "records": [], "files": {}}
+        return {
+            **base,
+            "analyzed": False,
+            "findings": [],
+            "operations": {},
+            "records": [],
+            "files": {},
+            "functions": {},
+            "function_decls": [],
+            "function_refs": [],
+        }
     tinfo = _TypeInfo(tu)
     findings: list[dict[str, Any]] = []
     records: list[dict[str, Any]] = []
     operations: dict[str, Any] = {}
     files: dict[str, str] = {}
+    functions: dict[str, Any] = {}
+    function_decls: list[dict[str, Any]] = []
+    function_refs: list[dict[str, Any]] = fn_summaries.file_scope_function_refs(tu, root)
 
     def fid_file(n: Node) -> str:
         f = n.loc.file_loc.file or "?"
@@ -240,6 +255,7 @@ def analyze_unit(manifest: dict[str, Any], unit_dir: str, root: str) -> dict[str
                 )
         elif k == "FunctionDecl":
             f = fid_file(top)
+            function_decls.append(fn_summaries.declaration_record(top, tu, root))
             fn_type = safe_parse(top.canonical_type)
             static = top.storage_class == "static"
             has_body = any(c.kind == "CompoundStmt" for c in top.real_children())
@@ -303,6 +319,9 @@ def analyze_unit(manifest: dict[str, Any], unit_dir: str, root: str) -> dict[str
                         }
                     )
             operations[fkey] = _operations(top, tinfo)
+            summary = fn_summaries.summarize_function(top, tu, root)
+            functions[fkey] = summary
+            function_refs.extend(summary["function_refs"])
     return {
         **base,
         "analyzed": True,
@@ -310,6 +329,9 @@ def analyze_unit(manifest: dict[str, Any], unit_dir: str, root: str) -> dict[str
         "operations": operations,
         "records": records,
         "files": files,
+        "functions": functions,
+        "function_decls": function_decls,
+        "function_refs": function_refs,
     }
 
 
@@ -434,8 +456,19 @@ def build_inventory(project: Project, profile_ids: list[str] | None = None, jobs
     files: dict[str, str] = {}
     operations: dict[str, Any] = {}
     records: dict[str, Any] = {}
+    functions: dict[str, Any] = {}
+    function_decls: dict[tuple[Any, Any], Any] = {}
+    function_refs: dict[tuple[Any, ...], Any] = {}
     units = []
     for r, m in zip(results, manifests):
+        for fk, summ in r.get("functions", {}).items():
+            _merge_function(functions, fk, summ, r["unit_id"], r["profile"])
+        for d in r.get("function_decls", []):
+            key = (d["file"], d["offset"])
+            cur = function_decls.setdefault(key, {**d, "units": []})
+            cur["units"].append(r["unit_id"])
+        for ref in r.get("function_refs", []):
+            function_refs.setdefault((ref.get("name"), ref.get("file"), ref.get("offset")), ref)
         status = fidelity.get(m["unit_id"], r["evidence_status"])
         units.append(
             {
@@ -503,6 +536,9 @@ def build_inventory(project: Project, profile_ids: list[str] | None = None, jobs
         "findings": findings,
         "pointer_bearing_records": sorted(records.values(), key=lambda r: (r["file"], r["line"] or 0)),
         "operations": operations,
+        "functions": functions,
+        "function_decls": sorted(function_decls.values(), key=lambda d: (d["file"] or "", d["offset"] or 0)),
+        "function_refs": sorted(function_refs.values(), key=lambda d: (d.get("file") or "", d.get("offset") or 0)),
         "coverage": coverage,
         "summary": {
             "findings": len(findings),
@@ -516,6 +552,24 @@ def build_inventory(project: Project, profile_ids: list[str] | None = None, jobs
     }
     write_json(store.inventory_path, inv)
     return inv
+
+
+def _merge_function(functions: dict[str, Any], key: str, summ: dict[str, Any], unit: str, profile: str) -> None:
+    """Union a function's summary across configurations (conservative: every configuration's effects)."""
+    cur = functions.get(key)
+    if cur is None:
+        functions[key] = {**summ, "units": [unit], "profiles": [profile]}
+        return
+    cur["units"].append(unit)
+    if profile not in cur["profiles"]:
+        cur["profiles"].append(profile)
+    for field in ("calls", "indirect_calls", "named_writes", "pointer_writes", "function_refs", "asm"):
+        seen = {json.dumps(x, sort_keys=True) for x in cur[field]}
+        for x in summ.get(field, []):
+            k = json.dumps(x, sort_keys=True)
+            if k not in seen:
+                seen.add(k)
+                cur[field].append(x)
 
 
 def _weakest(statuses: list[str]) -> str:

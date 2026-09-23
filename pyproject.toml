@@ -13,6 +13,7 @@ dependencies = ["PyYAML>=6"]
 
 [project.optional-dependencies]
 llm = ["anthropic>=1.0"]
+flow = ["pysvf>=1.0.0.43"]
 test = ["pytest>=7"]
 
 [project.scripts]
@@ -22,7 +23,7 @@ weaver = "weaver.cli:main"
 where = ["src"]
 
 [tool.setuptools.package-data]
-weaver = ["data/*"]
+weaver = ["data/*", "web/static/*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
