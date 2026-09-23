@@ -126,3 +126,23 @@ def test_snapshot_of_a_git_revision(project):
     rc, rep = check(project, "--since", "head")
     assert rc == 1 and list(rep["changed_files"]) == ["src/params.c"]
     assert rep["base"]["source"]["kind"] == "git"
+
+
+@needs_clang
+def test_borrowed_contract(project):
+    """A borrowed pointer is never written and never kept; the check follows it into callees."""
+    from weaver.errors import WeaverError
+
+    proj = load_project(project)
+    b = finding_id(project, "p_sum2", "b")
+    c = pin_contract(proj, b, ["borrowed"], "the caller's buffer is only lent for the call")
+    assert c["expect"] == ["borrowed"]
+    # util_touch(p) copies p into a global: pinning 'borrowed' on its parameter is refused
+    with pytest.raises(WeaverError, match="stored into global .last_seen."):
+        pin_contract(proj, finding_id(project, "util_touch", "p"), ["borrowed"], "")
+    save_snapshot(proj, "lent")
+    teammate_edit(project)  # now passes b to util_touch(), which keeps it
+    rc, rep = check(project, "--since", "lent")
+    (contract,) = [x for x in rep["contracts"] if x.get("finding") == b]
+    assert rc == 1 and contract["status"] == "violated"
+    assert "util_touch" in contract["text"] or "stored" in contract["text"]

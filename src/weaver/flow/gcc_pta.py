@@ -356,48 +356,62 @@ class GccPta:
         self.program = data.get("program")
 
     def may_modify(self, function: str, index: int) -> tuple[str, str]:
-        """(no | yes | unknown, explanation) for parameter ``index`` of ``function``."""
+        """(no | yes | unknown, explanation) for parameter ``index`` of ``function``.
+
+        ``yes`` only for a named object in both the parameter's points-to set and the call's
+        clobber set: a write GCC traced to that object.  When the overlap goes through memory
+        GCC does not track (``NONLOCAL``, ``ESCAPED``: what external code such as the C library
+        may write, which GCC has no model of), the answer is ``unknown``, not ``yes``.
+        """
+        img = f"GCC ({self.image})"
         f = self.functions.get(function)
         if f is None:
-            return "unknown", f"GCC ({self.image}): no points-to record for {function}()"
+            if function not in self.data.get("symbols", {}):
+                return "unknown", f"{img}: {function}() is not in the linked image (unreachable from its exports)"
+            return "unknown", f"{img}: no points-to record for {function}()"
         if f.get("renumbered"):
-            return "unknown", f"GCC ({self.image}): {function}() was cloned with changed parameters ({f['symbols']})"
+            return "unknown", f"{img}: {function}() was cloned with changed parameters ({f['symbols']})"
         arg = f["args"].get(str(index))
         clob = f.get("clobber")
         if arg is None or clob is None:
-            return "unknown", f"GCC ({self.image}): {function}() argument {index + 1} has no points-to set"
+            return "unknown", f"{img}: {function}() argument {index + 1} has no points-to set"
         a, c = set(arg), set(clob)
-        if "ANYTHING" in a or "ANYTHING" in c:
-            return "unknown", f"GCC ({self.image}): points-to set is ANYTHING"
+        if "ANYTHING" in a:
+            return "unknown", f"{img}: argument {index + 1} of {function}() may point to ANYTHING"
         ao, co = a - SPECIAL, c - SPECIAL
         both = ao & co
         if both:
             return (
                 "yes",
-                f"GCC ({self.image}): {function}() may write {', '.join(sorted(both))}, "
-                f"which argument {index + 1} may point to",
+                f"{img}: {function}() may write {', '.join(sorted(both))}, which argument {index + 1} may point to",
             )
+        if "ANYTHING" in c:
+            return "unknown", f"{img}: what a call to {function}() writes is ANYTHING"
         ext_a = bool(a & {"NONLOCAL", "ESCAPED"})
         if ext_a and (co or c & {"NONLOCAL", "ESCAPED"}):
             return (
-                "yes",
-                f"GCC ({self.image}): argument {index + 1} may point to memory outside the image, "
-                "and the call writes memory",
+                "unknown",
+                f"{img}: argument {index + 1} may point to memory outside the image, and the call writes memory",
             )
         if "NONLOCAL" in c:
             hit = sorted(o for o in ao if o in self.variables or o.startswith("HEAP"))
             if hit:
-                return "yes", f"GCC ({self.image}): {function}() may write non-local memory, including {', '.join(hit)}"
+                return (
+                    "unknown",
+                    f"{img}: {function}() may write untracked non-local memory; argument {index + 1} may point to "
+                    + ", ".join(hit),
+                )
         if "ESCAPED" in c:
             hit = sorted(ao & self.escaped)
             if hit:
-                return "yes", f"GCC ({self.image}): {function}() may write escaped memory, including {', '.join(hit)}"
+                return (
+                    "unknown",
+                    f"{img}: {function}() may write escaped memory; argument {index + 1} may point to escaped "
+                    + ", ".join(hit),
+                )
         pts = ", ".join(sorted(a - {"NULL"})) or "nothing"
-        return (
-            "no",
-            f"GCC ({self.image}): {function}() writes {{{', '.join(sorted(c - {'NULL'}))}}}; "
-            f"argument {index + 1} points to {{{pts}}}",
-        )
+        writes = ", ".join(sorted(c - {"NULL"}))
+        return "no", f"{img}: {function}() writes {{{writes}}}; argument {index + 1} points to {{{pts}}}"
 
     def visibility(self, function: str) -> str | None:
         s = self.data.get("symbols", {}).get(function)

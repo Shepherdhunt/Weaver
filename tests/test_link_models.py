@@ -228,12 +228,16 @@ def test_borrow_check_follows_the_pointer_interprocedurally():
     assert res.status == "held", res.reasons
     assert [v["name"] for v in res.visited] == ["buf", "msg", "cmd"]
 
+    saved = _f("G0", "global", None, "Saved", [])
+
     def verdict(*extra_uses, analysed=("Handle",)):
         cmd2 = {**cmd, "uses": [*cmd["uses"], *extra_uses]}
-        return check_borrow({"findings": [buf, msg, cmd2]}, _Prog(analysed, MODELS), buf)
+        return check_borrow({"findings": [buf, msg, cmd2, saved]}, _Prog(analysed, MODELS), buf)
 
     assert verdict(_use("arrow", 12, "member-write")).status == "violated"
-    assert verdict(_use("copy", 12, into={"target": "global", "name": "Saved"})).status == "violated"
+    assert verdict(_use("copy", 12, into={"target": "variable", "name": "Saved"})).status == "violated"  # a global
+    assert verdict(_use("copy", 12, into={"target": "field", "name": "last"})).status == "violated"
+    assert verdict(_use("copy", 12, into={"target": "variable", "name": "n"})).status == "unknown"  # not a pointer
     assert verdict(_use("return", 12)).status == "violated"
     assert verdict(_use("call-arg", 12, callee="keep", arg=0)).status == "violated"  # retained after return
     assert verdict(_use("call-arg", 12, callee="fill", arg=0)).status == "violated"  # written by the callee

@@ -91,10 +91,14 @@ def test_may_modify_answers():
     status, text = g.may_modify("writer", 0)
     assert status == "yes" and "may write m" in text
     assert g.may_modify("helper", 0)[0] == "yes"  # union of both statics: conservative
-    assert g.may_modify("ext", 0)[0] == "yes"  # external memory and a call that writes external memory
-    assert g.may_modify("any", 0)[0] == "unknown"  # ANYTHING
+    # external memory and a call that writes external memory: GCC cannot tell, so unknown, not yes
+    assert g.may_modify("ext", 0)[0] == "unknown"
+    assert "ANYTHING" in g.may_modify("any", 0)[1]
     assert g.may_modify("split", 0)[0] == "unknown"  # parameters may be renumbered in a .part clone
-    assert g.may_modify("missing", 0)[0] == "unknown"
+    assert g.may_modify("missing", 0) == (
+        "unknown",
+        "GCC (prog): missing() is not in the linked image (unreachable from its exports)",
+    )
     assert g.may_modify("writer", 3)[0] == "unknown"  # no such argument set
     assert g.visibility("main").startswith("externally_visible")
 

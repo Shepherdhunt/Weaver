@@ -227,7 +227,10 @@ it recompiles each unit with its production command plus `-O1 -flto -fipa-pta`, 
 parameter-rewriting IPA passes off so functions keep their source shape. It then replays each
 image's captured link with LTO and reads GCC's `pta2` dump. `F.clobber` (what a call may write,
 callees and resolved indirect calls included) is intersected with `F.argN` (what the parameter may
-point to over all call sites), with `NONLOCAL`/`ESCAPED` treated conservatively. GCC names objects
+point to over all call sites). Only a named object in both sets counts as a write (`yes`). An
+overlap through memory GCC does not track (`NONLOCAL`, `ESCAPED`: what external code such as the C
+library may write, for which GCC has no model), or an `ANYTHING` set, answers `unknown`. That is
+"cannot tell", not counter-evidence. GCC names objects
 by declaration name, so two objects with the same name are merged. Two `static` functions of one
 name (LTO's `.lto_priv.N`) are united. Clones that may renumber parameters (`.isra`, `.constprop`,
 `.part`) make answers `unknown`. Each deviation from the production flags is recorded. Both merges
@@ -256,10 +259,14 @@ test made every cFS transaction fail validation.
 - Inventory facts are syntactic. Their possible targets are intraprocedural hypotheses, labelled as
   such. SVF points-to sets are flow- and context-insensitive and field-insensitive (Andersen).
 - GCC's points-to solution comes from an `-O1` LTO build, not the production `-O*` level, and
-  names objects by declaration name. Scalar-input is the only recipe that consults it so far.
-- Whole-program recipe evaluation on cFS takes about four minutes per recipe, with up to about
-  5 GB resident. ASTs are cached with a bounded LRU, but function summaries and flow evidence for
-  the whole program stay in memory.
+  names objects by declaration name. On cFE it saturates: 759 of the 1,068 functions left in
+  `core-cpu1` have `ANYTHING` in their clobber set, so GCC decides far fewer candidates than SVF
+  (see [`pilots/cfs`](../pilots/cfs/README.md)). It is most useful as an independent cross-check,
+  and as the only backend where SVF cannot be used. Scalar-input is the only recipe that consults
+  it so far.
+- Whole-program recipe evaluation on cFS takes about 3.5 minutes per recipe, with about 7 GB peak
+  resident memory. ASTs are cached with a bounded LRU (before that, memory grew past 10 GB), but
+  function summaries and flow evidence for the whole program stay in memory.
 - `scalar-input` handles pointers to scalars that are spelled as plain pointer declarators. Struct
   targets, pointer-to-pointer, array parameters and typedef'd pointer parameters are blocked.
 - Effect models cover POSIX/glibc and the cFE/OSAL APIs `sample_app` uses. Other cFS
