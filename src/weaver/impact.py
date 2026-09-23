@@ -509,7 +509,11 @@ def diff(project: Project, base: dict[str, Any], cur: dict[str, Any], cur_verdic
         ca, cb = access_class(a), access_class(b)
         ua = {_use_key(u) for u in a.get("uses", [])}
         new_uses = [u for u in b.get("uses", []) if _use_key(u) not in ua]
-        gone = {_use_key(u) for u in a.get("uses", [])} - {_use_key(u) for u in b.get("uses", [])}
+        cur = {_use_key(u) for u in b.get("uses", [])}
+        gone: dict[tuple[str, str, str], dict[str, Any]] = {}
+        for u in a.get("uses", []):
+            if _use_key(u) not in cur:
+                gone.setdefault(_use_key(u), u)  # described from the baseline's own record
         for u in new_uses:
             k, acc = u["kind"], u.get("access")
             d = describe_use_parts(k, acc, u.get("detail") or {})
@@ -532,8 +536,10 @@ def diff(project: Project, base: dict[str, Any], cur: dict[str, Any], cur_verdic
                 source=_source_line(project.root, b.get("file"), u["line"]),
                 caused_by_change=_in_hunks(hunks, u["line"]),
             )
-        for k, acc, det in sorted(gone):
-            add(INFO, b, "use-removed", f"no longer {describe_use_parts(k, acc or None, {})}{' ' + det if det else ''}")
+        for key in sorted(gone):
+            u = gone[key]
+            what = describe_use_parts(u["kind"], u.get("access"), u.get("detail") or {})
+            add(INFO, b, "use-removed", f"no longer {what}")
         if ca != cb:
             add(
                 HIGH if (ca == "read-only" and cb in ("writes", "escapes")) else REVIEW,

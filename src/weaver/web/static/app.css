@@ -29,8 +29,9 @@
   color-scheme: light;
 }
 
+/* dark palette: the OS preference, unless a host page pins a theme with data-theme */
 @media (prefers-color-scheme: dark) {
-  :root {
+  :root:not([data-theme="light"]) {
     --bg: #0e1116;
     --panel: #151a21;
     --panel-2: #1b2129;
@@ -57,6 +58,33 @@
     --warn: #f5b041;
     color-scheme: dark;
   }
+}
+:root[data-theme="dark"] {
+  --bg: #0e1116;
+  --panel: #151a21;
+  --panel-2: #1b2129;
+  --panel-3: #232a34;
+  --border: #2b333e;
+  --text: #e5e9ef;
+  --muted: #9aa4b0;
+  --faint: #6f7a87;
+  --accent: #8d8df7;
+  --accent-soft: #25254a;
+  --code-bg: #12161c;
+  --shadow: 0 1px 2px rgba(0, 0, 0, .4), 0 6px 20px rgba(0, 0, 0, .35);
+
+  --c-read-only: #3ccf8e;
+  --c-writes: #f5b041;
+  --c-escapes: #ff6b6b;
+  --c-reassigned: #6aa3ff;
+  --c-unused: #8e98a5;
+  --c-unknown: #8e98a5;
+  --c-eligible: #b197fc;
+  --c-removed: #3ccf8e;
+  --ok: #3ccf8e;
+  --bad: #ff6b6b;
+  --warn: #f5b041;
+  color-scheme: dark;
 }
 
 * { box-sizing: border-box; }
@@ -386,3 +414,9 @@ button.pill { cursor: pointer; font: inherit; background: none; }
   .s-row { grid-template-columns: minmax(0, 1fr) auto; }
   .s-row .s-name, .s-row .s-timeout { grid-column: 1 / -1; }
 }
+
+/* read-only snapshot (weaver export-ui) */
+.banner.info { border-color: color-mix(in srgb, var(--accent) 40%, transparent); background: var(--accent-soft); }
+.snap-ds { border: 1px solid var(--border); border-radius: 8px; padding: 5px 8px; background: var(--panel); max-width: 14em; }
+.copy-box { display: flex; gap: 8px; align-items: flex-start; margin: 6px 0 10px; }
+.copy-box pre { flex: 1; min-width: 0; margin: 0; overflow-x: auto; white-space: pre; }

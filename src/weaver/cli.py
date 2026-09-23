@@ -727,7 +727,29 @@ def cmd_serve(args: argparse.Namespace) -> int:
     path = args.project or args.config
     if path is None and Path(CONFIG_NAME).exists():
         path = "."
-    serve(path, host=args.host, port=args.port, open_browser=args.open)
+    serve(path, host=args.host, port=args.port, open_browser=args.open, scope=args.scope)
+    return 0
+
+
+def cmd_export_ui(args: argparse.Namespace) -> int:
+    from weaver.web.export import load_dataset, render_page, snapshot_dataset
+
+    datasets = [load_dataset(Path(p)) for p in args.add or []]
+    if not args.only_added:
+        proj = _project(args)
+        say = lambda m: print(m, file=sys.stderr)  # noqa: E731
+        ds = snapshot_dataset(proj, args.scope, args.label, args.description or "", log=say)
+        datasets.insert(0, ds)
+    if not datasets:
+        raise WeaverError("nothing to export: give a project, or --add a dataset")
+    out = Path(args.output)
+    if args.json:
+        if len(datasets) != 1:
+            raise WeaverError("--json writes one dataset; combine datasets into a page with --add")
+        out.write_text(json.dumps(datasets[0], separators=(",", ":")))
+    else:
+        out.write_text(render_page(datasets, args.title, args.fragment, args.repo, args.branch))
+    print(f"wrote {out} ({out.stat().st_size // 1024} KiB, {len(datasets)} dataset(s))")
     return 0
 
 
@@ -902,6 +924,24 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--host", default="127.0.0.1", help="bind address (default: loopback only)")
     sp.add_argument("--port", type=int, default=8765)
     sp.add_argument("--open", action="store_true", help="open a browser")
+    sp.add_argument(
+        "--scope",
+        action="append",
+        help="only show pointers under this path prefix (repeatable); recipes still see the whole program",
+    )
+
+    sp = add("export-ui", cmd_export_ui, "write a read-only snapshot of the web interface as one HTML file")
+    sp.add_argument("-o", "--output", required=True, help="the HTML page (or dataset, with --json) to write")
+    sp.add_argument("--scope", action="append", help="only pointers under this path prefix (repeatable)")
+    sp.add_argument("--label", help="the dataset's name in the page (default: the project name)")
+    sp.add_argument("--description", help="one line shown with the dataset")
+    sp.add_argument("--add", action="append", help="also include a dataset written earlier with --json (repeatable)")
+    sp.add_argument("--only-added", action="store_true", help="do not export the current project, only --add datasets")
+    sp.add_argument("--json", action="store_true", help="write this project's dataset as JSON instead of a page")
+    sp.add_argument("--title", default="Weaver", help="the page title")
+    sp.add_argument("--fragment", action="store_true", help="leave out <html>, <head> and <body> (the host adds them)")
+    sp.add_argument("--repo", help="git URL the page's run-it-locally steps clone")
+    sp.add_argument("--branch", help="branch the page's run-it-locally steps check out")
 
     sp = add("auto", cmd_auto, "propose/validate/accept eligible candidates under the acceptance policy")
     sp.add_argument("--recipe", help="restrict to one recipe (default: all)")

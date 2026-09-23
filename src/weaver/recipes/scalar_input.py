@@ -569,6 +569,10 @@ class ScalarInputRecipe(Recipe):
             pre.fail(UNRESOLVED, "the task model needs the function's program (link model) and its flow evidence")
             return
         for key, fe in flows.items():
+            if fe is None and "/" not in key and ctx.link(key).programs:
+                # the link model places the function in no image: no task of any analysed program runs it
+                pre.fail(UNRESOLVED, f"{key}: {fname}() is linked into no analysed program, so no task model covers it")
+                continue
             if fe is None:
                 pre.fail(UNRESOLVED, f"{key}: the task model needs current SVF points-to evidence", "run 'weaver flow'")
                 continue

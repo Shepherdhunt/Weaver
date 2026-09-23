@@ -26,10 +26,16 @@ from weaver.util import read_json, sha256_file
 class Cache:
     """Per-inventory cache of recipe verdicts (evaluating recipes is the expensive part)."""
 
-    def __init__(self) -> None:
+    def __init__(self, scope: list[str] | None = None) -> None:
         self.key: tuple[str, str] | None = None
         self.verdicts: dict[str, Any] = {}
         self.inv: dict[str, Any] | None = None
+        # Path prefixes the views show (large projects: a subsystem at a time).  Recipes still see the
+        # whole program; only findings under these prefixes are evaluated and listed.
+        self.scope = scope or []
+
+    def in_scope(self, path: str | None) -> bool:
+        return not self.scope or any((path or "").startswith(s) for s in self.scope)
 
     def get(self, project: Project) -> tuple[dict[str, Any], dict[str, Any]]:
         inv = load_inventory(project)
@@ -39,6 +45,12 @@ class Cache:
 
             ctx = RecipeContext(project, inv)
             verdicts: dict[str, Any] = {}
+            if self.scope:
+                inv = {
+                    **inv,
+                    "findings": [f for f in inv["findings"] if self.in_scope(f.get("file"))],
+                    "files": {k: v for k, v in inv["files"].items() if self.in_scope(k)},
+                }
             for f in inv["findings"]:
                 for r in recipes_for_finding(f):
                     res = r.evaluate(ctx, f)
@@ -297,6 +309,8 @@ def map_model(project: Project, cache: Cache) -> dict[str, Any]:
         c[cls] = c.get(cls, 0) + 1
     for key, fsum in inv.get("functions", {}).items():
         file, _, name = key.partition("::")
+        if not cache.in_scope(file):
+            continue
         e = fn_entry(file, name)
         e["line"] = fsum.get("line")
         e["calls"] = sorted({c["callee"] for c in fsum.get("calls", []) if c.get("callee")})

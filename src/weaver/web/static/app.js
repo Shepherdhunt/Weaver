@@ -6,7 +6,9 @@
  */
 "use strict";
 
-const TOKEN = document.querySelector('meta[name="weaver-token"]').content;
+// A page written by 'weaver export-ui' carries recorded answers instead of a server.
+const SNAP = window.WEAVER_SNAPSHOT || null;
+const TOKEN = SNAP ? "" : document.querySelector('meta[name="weaver-token"]').content;
 const CLASSES = ["read-only", "writes", "escapes", "reassigned", "unused"];
 const CLASS_LABEL = {
   "read-only": "read-only", writes: "writes through", escapes: "escapes",
@@ -25,11 +27,12 @@ const S = {
   selected: null, detail: null, view: "map", graphMode: "auto",
   filters: { classes: new Set(), eligible: false, q: "", kinds: new Set() },
   source: null, sourceFile: null, focusLine: null,
-  snapshots: [], impact: null, ledger: [], jobs: new Map(),
+  snapshots: [], impact: null, ledger: [], jobs: new Map(), dataset: 0,
 };
 
 // ---------------------------------------------------------------- utilities
 async function api(path, body) {
+  if (SNAP) return snapApi(path, body);
   const opt = { headers: { "X-Weaver-Token": TOKEN } };
   if (body !== undefined) {
     opt.method = "POST";
@@ -87,6 +90,7 @@ function toast(msg, ms = 3200) {
 }
 
 function fail(e) {
+  if (e && e.snapshot) return readOnly(e.snapshot);
   console.error(e);
   toast(e.message || String(e), 6000);
 }
@@ -105,7 +109,9 @@ async function boot() {
   renderTop();
   if (!S.state.project) return renderWelcome();
   renderWorkspace();
+  if (SNAP) S.impact = S.impact || snapData().impact || null;
   await loadData();
+  if (SNAP && !S.selected && snapData().select && window.innerWidth > 1100) await select(snapData().select);
   for (const j of S.state.running || []) followJob(j);
 }
 
@@ -168,7 +174,7 @@ function renderTop() {
       val.level === "compile-only" ? "validation: compile only" : val.level === "behavioural-optional" ? "tests not required" : "validation: tests"));
   }
   const busy = (st.running || []).some((j) => j.state === "running");
-  acts.append(
+  acts.append(...[
     h("button", { class: "btn primary", disabled: busy, onclick: () => compile(),
       title: "Rebuild through capture shims (if configured), collect compiler evidence, check fidelity, " +
              "build the inventory and run points-to analysis" }, "▶ Compile & analyse"),
@@ -177,9 +183,14 @@ function renderTop() {
         (st.svf_available || !(st.flow_backends || []).includes("svf") ? "" : " (SVF is not installed: pip install weaver[flow])") },
       "Points-to"),
     h("button", { class: "btn ghost", onclick: () => openSettings(), title: "Validation commands and acceptance policy" }, "Settings"),
-    h("button", { class: "btn ghost", onclick: () => { S.state.project = null; renderWelcome(true); },
+    SNAP ? null : h("button", { class: "btn ghost", onclick: () => { S.state.project = null; renderWelcome(true); },
       title: "Open another project" }, "Open…"),
-  );
+    SNAP && SNAP.datasets.length > 1 ? h("select", { class: "snap-ds", id: "snap-dataset", "aria-label": "Example project",
+      onchange: (e) => switchDataset(Number(e.target.value)) },
+      SNAP.datasets.map((d, i) => h("option", { value: i, selected: i === S.dataset, text: d.label }))) : null,
+    SNAP ? h("button", { class: "btn", onclick: () => runLocally(),
+      title: "This page is a read-only recording. See how to run Weaver on your own code." }, "Run it locally") : null,
+  ].filter(Boolean));
 }
 
 // ---------------------------------------------------------------- welcome
@@ -458,6 +469,16 @@ function renderView() {
         "build the pointer inventory, and run points-to analysis when SVF is installed." }),
       h("button", { class: "btn primary", onclick: () => compile() }, "▶ Compile & analyse")));
     return;
+  }
+  if (SNAP && !S.snapNoteClosed) {
+    const d = snapData();
+    const note = h("div", { class: "banner info" },
+      h("button", { class: "btn small ghost", style: { float: "right" }, "aria-label": "Dismiss",
+        onclick: () => { S.snapNoteClosed = true; note.remove(); } }, "✕"),
+      h("b", { text: `Snapshot: ${d.label}. ` }), d.description ? d.description + " " : "",
+      "Everything here is browsable: select pointers, open transactions, switch views. Actions that would change the code ",
+      "show what they do and how to run them locally.");
+    v.append(note);
   }
   ({ map: renderMap, graph: renderGraph, source: renderSource, changes: renderChanges, ledger: renderLedger })[S.view](v);
 }
@@ -1107,6 +1128,101 @@ function followJob(job, onDone) {
     await refreshState();
   };
   tick();
+}
+
+// ---------------------------------------------------------------- snapshot mode
+function snapData() { return SNAP.datasets[S.dataset]; }
+
+function snapApi(path, body) {
+  const d = snapData();
+  if (body !== undefined) {
+    // a pointer that has a recorded transaction opens it; everything else would change the project
+    const txn = path === "propose" && d.proposals[body.finding];
+    if (txn && d.responses["ledger/" + txn]) return Promise.resolve(structuredClone(d.responses["ledger/" + txn]));
+    const e = new Error("This snapshot is read-only.");
+    e.snapshot = path;
+    return Promise.reject(e);
+  }
+  const key = decodeURIComponent(path);
+  if (key in d.responses) return Promise.resolve(structuredClone(d.responses[key]));
+  return Promise.reject(new Error(`Not recorded in this snapshot: ${key}`));
+}
+
+const SNAP_ACTIONS = {
+  compile: ["Compile & analyse", "rebuilds the project through recording compiler shims, collects compiler evidence, checks the secondary frontend's fidelity, rebuilds the pointer inventory and runs points-to analysis.", "weaver refresh --capture"],
+  flow: ["Points-to", "runs SVF and GCC's IPA points-to analysis over each linked program.", "weaver flow"],
+  propose: ["Propose", "evaluates the recipe again, opens a transaction in the ledger and previews the patch.", "weaver propose P-…"],
+  validate: ["Validate", "applies the patch in an isolated copy, rebuilds both trees with the production compiler, re-checks the patched AST and runs the configured tests on both.", "weaver validate T-…"],
+  accept: ["Accept", "applies a validated patch to the working tree under the acceptance policy and re-analyses.", "weaver accept T-…"],
+  revert: ["Revert", "undoes an accepted transaction.", "weaver revert T-…"],
+  skip: ["Skip", "closes a transaction without applying it.", "weaver skip T-…"],
+  settings: ["Save settings", "rewrites weaver.yaml with the validation commands, acceptance policy, concurrency declaration and flow backend.", "weaver tests --add …   (or edit weaver.yaml)"],
+  contracts: ["Pin contract", "records what must stay true of this pointer; later edits that break it are flagged in Changes.", "weaver contract pin P-… --expect read-only"],
+  explain: ["Explain", "sends the pointer's evidence to the configured LLM planner for an advisory explanation (it never edits code).", "weaver explain P-… --dry-run"],
+  snapshots: ["Save a baseline", "freezes today's pointer facts, recipe verdicts and source tree.", "weaver snapshot save --name baseline"],
+  impact: ["Compare", "explains how pointer behaviour changed since a baseline. The report on this page was recorded when the page was made.", "weaver impact --since baseline"],
+};
+
+function readOnly(path) {
+  const key = path.startsWith("txn/") ? path.split("/")[2] : path.split("/")[0];
+  const [label, what, cmd] = SNAP_ACTIONS[key] || [path, "changes the project.", "weaver serve"];
+  modal(`${label} runs on your machine`, [
+    h("p", {}, h("b", { text: label }), " " + what),
+    h("p", { class: "d-sub", text: "This page is a recorded, read-only copy of the web interface, so it cannot run anything. In a local Weaver the same button works, or from the command line:" }),
+    copyable(cmd),
+    ...localSteps(),
+  ], (close) => [h("button", { class: "btn", onclick: close }, "Close")]);
+}
+
+function copyable(text) {
+  const pre = h("pre", { class: "diff copy", text });
+  const btn = h("button", { class: "btn small", onclick: async () => {
+    try { await navigator.clipboard.writeText(text); btn.textContent = "Copied"; }
+    catch (e) {
+      const r = document.createRange(); r.selectNodeContents(pre);
+      const sel = getSelection(); sel.removeAllRanges(); sel.addRange(r);
+      btn.textContent = "Selected: press Ctrl+C";
+    }
+  } }, "Copy");
+  return h("div", { class: "copy-box" }, pre, btn);
+}
+
+function localSteps() {
+  const clone = SNAP.repo ? `git clone${SNAP.branch ? " --branch " + SNAP.branch : ""} ${SNAP.repo} weaver\n` : "";
+  return [
+    h("h4", { text: "Run Weaver on your machine" }),
+    h("p", { class: "d-sub", text: "Needs Python 3.10 or later and GCC or Clang. The optional [flow] extra adds SVF points-to analysis (AGPL, run as a separate process)." }),
+    copyable(`${clone}cd weaver\npython -m pip install -e '.[flow]'\ncp -r tests/fixtures/demo ~/weaver-demo\nweaver serve --open`),
+    h("p", { class: "d-sub", text: "In the browser choose “Set up a new project”: directory ~/weaver-demo, build command make -B CC={cc}, compiler gcc or clang. For your own code, give its directory and a full-rebuild command with {cc} where the compiler goes." }),
+    SNAP.web ? h("p", { class: "d-sub" }, "Source: ", h("a", { href: SNAP.web, target: "_blank", rel: "noopener", text: SNAP.web })) : null,
+  ];
+}
+
+function runLocally() {
+  const d = snapData();
+  const inv = S.state && S.state.inventory;
+  modal("Run Weaver on your code", [
+    h("p", {}, "You are browsing ", h("b", { text: d.label }), ", recorded with ", h("code", { text: "weaver export-ui" }),
+      (inv ? `: ${inv.summary.findings} pointer(s) in the analysed program` : "") +
+      (d.scope && d.scope.length ? `, those under ${d.scope.join(", ")} shown` : "") + ". " + (d.description || "")),
+    ...localSteps(),
+  ], (close) => [h("button", { class: "btn", onclick: close }, "Close")]);
+}
+
+function switchDataset(i) {
+  Object.assign(S, { dataset: i, selected: null, detail: null, source: null, sourceFile: null, focusLine: null,
+    impact: null, view: "map", graphMode: "auto", map: null, pointers: [], removed: [] });
+  S.filters = { classes: new Set(), eligible: false, q: "", kinds: new Set() };
+  try { localStorage.setItem("weaver-snapshot-dataset", snapData().id); } catch (e) { /* a convenience only */ }
+  boot();
+}
+
+if (SNAP) {
+  // a bare #id in the link picks the dataset; otherwise the one this viewer chose last
+  let want = location.hash.slice(1);
+  try { want = want || localStorage.getItem("weaver-snapshot-dataset") || ""; } catch (e) { /* no storage */ }
+  const i = SNAP.datasets.findIndex((d) => d.id === want);
+  if (i >= 0) S.dataset = i;
 }
 
 boot();

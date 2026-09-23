@@ -253,3 +253,32 @@ def test_test_detection_setup_and_settings_editor(tmp_path):
         assert "compile" in e["error"]
     finally:
         c.close()
+
+
+@needs_clang
+def test_read_only_snapshot_export(analysed, tmp_path):
+    """'weaver export-ui' records the views, scoped or not, into one page that needs no server."""
+    from weaver.config import load_project
+    from weaver.web.export import render_page, snapshot_dataset
+
+    ds = snapshot_dataset(load_project(analysed), label="Demo")
+    r = ds["responses"]
+    assert ds["id"] == "demo" and r["state"]["project"]["root"] == "demo"  # no path of the exporting machine
+    assert str(analysed) not in json.dumps(ds)
+    ids = [p["id"] for p in r["pointers"]["pointers"]]
+    assert len(ids) == 45 and all(f"pointer/{i}" in r and f"neighborhood/{i}" in r for i in ids)
+    assert "source?file=src/alias.c" in r and "settings" in r and r["ledger"] == []
+    assert ds["select"] in ids and r["pointer/" + ds["select"]]["recipes"]  # opens on a pointer with a verdict
+
+    scoped = snapshot_dataset(load_project(analysed), scope=["src/params.c"])
+    assert {p["file"] for p in scoped["responses"]["pointers"]["pointers"]} == {"src/params.c"}
+    assert [f["file"] for f in scoped["responses"]["map"]["files"]] == ["src/params.c"]
+
+    page = render_page([ds, scoped], "Weaver Playtest", fragment=True, repo="https://github.com/o/r.git", branch="b")
+    assert page.startswith("<title>Weaver Playtest</title>") and "<html" not in page and "/static/" not in page
+    data = page.split("window.WEAVER_SNAPSHOT = ", 1)[1].split(";</script>", 1)[0]
+    assert "<" not in data  # the embedded source cannot close the script element
+    snap = json.loads(data)
+    assert snap["web"] == "https://github.com/o/r/tree/b" and len(snap["datasets"]) == 2
+    assert "#include <stdio.h>" in "\n".join(snap["datasets"][0]["responses"]["source?file=src/main.c"]["lines"])
+    assert render_page([ds]).startswith("<!doctype html>")

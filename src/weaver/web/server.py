@@ -62,12 +62,13 @@ class Job:
 
 
 class App:
-    def __init__(self, project_path: str | None = None):
+    def __init__(self, project_path: str | None = None, scope: list[str] | None = None):
         self.token = secrets.token_urlsafe(24)
         self.project: Project | None = None
         self.jobs: dict[str, Job] = {}
         self.busy = threading.Lock()
-        self.cache = api.Cache()
+        self.scope = scope or []
+        self.cache = api.Cache(self.scope)
         self.recent: list[str] = []
         if project_path:
             self.open(project_path)
@@ -75,7 +76,7 @@ class App:
     # -- project ----------------------------------------------------------------
     def open(self, path: str) -> Project:
         self.project = load_project(path)
-        self.cache = api.Cache()
+        self.cache = api.Cache(self.scope)
         root = str(self.project.root)
         self.recent = [root] + [r for r in self.recent if r != root][:7]
         return self.project
@@ -311,7 +312,7 @@ def route(app: App, method: str, path: str, q: dict[str, str], body: dict[str, A
 
         new, warnings = app.exclusive(lambda: write_settings(proj, body))
         app.project = new
-        app.cache = api.Cache()
+        app.cache = api.Cache(app.scope)
         return {"ok": True, "warnings": warnings, "settings": read_settings(new)}
     if (method, head) == ("GET", "pointers"):
         return api.pointer_list(proj, app.cache)
@@ -395,7 +396,7 @@ def route(app: App, method: str, path: str, q: dict[str, str], body: dict[str, A
     if (method, head) == ("POST", "contracts"):
         from weaver.impact import pin_contract
 
-        app.cache = api.Cache()
+        app.cache = api.Cache(app.scope)
         return app.exclusive(
             lambda: pin_contract(proj, body["finding"], list(body["expect"]), body.get("reason") or "")
         )
@@ -419,8 +420,14 @@ def make_server(app: App, host: str = "127.0.0.1", port: int = 8765) -> Threadin
     return httpd
 
 
-def serve(project_path: str | None, host: str = "127.0.0.1", port: int = 8765, open_browser: bool = False) -> None:
-    app = App(project_path)
+def serve(
+    project_path: str | None,
+    host: str = "127.0.0.1",
+    port: int = 8765,
+    open_browser: bool = False,
+    scope: list[str] | None = None,
+) -> None:
+    app = App(project_path, scope)
     httpd = make_server(app, host, port)
     url = f"http://{'localhost' if host in ('127.0.0.1', '::1') else host}:{httpd.server_address[1]}/"
     print(f"Weaver web interface on {url}  (Ctrl-C to stop)", flush=True)
