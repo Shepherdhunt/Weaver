@@ -68,7 +68,7 @@ standard library.
 ## Web interface
 
 ```sh
-weaver serve [PROJECT_DIR]      # http://localhost:8765, loopback only
+weaver serve [PROJECT_DIR]      # loopback only, port 61847 (or the next free one); prints a sign-in link
 weaver serve --scope apps/sample_app            # large projects: show one subsystem at a time
 weaver export-ui -o weaver.html                 # a read-only copy of the interface, no server needed
 ```
@@ -101,8 +101,14 @@ differential run is configured, so an accepted change has been compiled and re-c
 run. **Settings** edits validation commands, the acceptance policy, the concurrency declaration and
 the flow backend. It saves `weaver.yaml` and keeps the previous file as `weaver.yaml.bak`.
 
-The server binds to 127.0.0.1. It rejects foreign `Host` headers (DNS rebinding) and requires a
-per-process token on every API call. Modifying operations run one at a time.
+The server binds to 127.0.0.1 on port 61847, or the next free port if that one is taken
+(`--port N` binds exactly N, `--port 0` any free port). The port is not a secret. The session is
+protected by a random key that changes on every start and appears only in the terminal: open the
+link `weaver serve` prints (`--open` does it for you). The link sets an HttpOnly, SameSite=Strict
+cookie for that browser and drops the key from the address bar. The page itself never contains the
+key, so other accounts on a shared machine cannot drive your session. The server also rejects
+foreign `Host` headers (DNS rebinding) and API calls without the page's own request header (CSRF).
+Modifying operations run one at a time.
 
 ## Command-line walkthrough
 

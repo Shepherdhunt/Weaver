@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import http.client
 import json
-import re
 import shutil
 import threading
 import time
@@ -84,20 +83,54 @@ def client(analysed):
 
 @needs_clang
 def test_request_guards(client):
-    st, headers, body = client.raw("GET", "/")
-    assert st == 200 and "default-src 'self'" in headers["Content-Security-Policy"]
-    token = re.search(rb'name="weaver-token" content="([^"]+)"', body).group(1).decode()
-    assert token == client.app.token
-    assert client.raw("GET", "/api/state")[0] == 403  # no token
-    assert client.raw("GET", "/api/state", headers={"X-Weaver-Token": "nope"})[0] == 403
-    # DNS rebinding: a foreign Host header is refused even with the token
-    assert client.raw("GET", "/api/state", headers={"X-Weaver-Token": token, "Host": "evil.test"})[0] == 403
-    assert client.raw("GET", "/", headers={"Host": f"evil.test:{client.port}"})[0] == 403
+    key = client.app.token
+    st, _, body = client.raw("GET", "/")
+    assert st == 401 and b"weaver serve" in body and key.encode() not in body  # the page never holds the key
+    assert client.raw("GET", "/?token=wrong")[0] == 401
+    # the printed link exchanges the key for an HttpOnly, SameSite=Strict cookie and drops it from the URL
+    st, headers, _ = client.raw("GET", "/?token=" + key)
+    assert st == 303 and headers["Location"] == "/"
+    assert "HttpOnly" in headers["Set-Cookie"] and "SameSite=Strict" in headers["Set-Cookie"]
+    cookie = headers["Set-Cookie"].split(";")[0]
+    assert cookie.startswith(f"weaver-{client.port}=")
+    st, headers, body = client.raw("GET", "/", headers={"Cookie": cookie})
+    assert st == 200 and "default-src 'self'" in headers["Content-Security-Policy"] and key.encode() not in body
+    browser = {"Cookie": cookie, "X-Weaver-Request": "1"}
+    assert client.raw("GET", "/api/state", headers=browser)[0] == 200
+    assert client.raw("GET", "/api/state")[0] == 401  # no key
+    assert client.raw("GET", "/api/state", headers={"X-Weaver-Token": "nope"})[0] == 401
+    assert client.raw("GET", "/api/state", headers={"Cookie": cookie})[0] == 401  # no custom header: not this page
+    other = {"Cookie": f"weaver-{client.port + 1}={key}", "X-Weaver-Request": "1"}
+    assert client.raw("GET", "/api/state", headers=other)[0] == 401  # another server's cookie name
+    # DNS rebinding: a foreign Host header is refused even with the key
+    assert client.raw("GET", "/api/state", headers={**browser, "Host": "evil.test"})[0] == 403
+    assert client.raw("GET", "/api/state", headers={"X-Weaver-Token": key, "Host": "evil.test"})[0] == 403
+    assert client.raw("GET", "/?token=" + key, headers={"Host": f"evil.test:{client.port}"})[0] == 403
     # simple (form) POSTs are refused
-    st, _, _ = client.raw("POST", "/api/compile", b"{}", {"X-Weaver-Token": token, "Content-Type": "text/plain"})
+    st, _, _ = client.raw("POST", "/api/compile", b"{}", {**browser, "Content-Type": "text/plain"})
     assert st == 415
     assert client.raw("GET", "/static/../server.py")[0] == 404
     client.api("source?file=../../../../etc/passwd", status=404)
+
+
+def test_port_selection():
+    """By default the first free port from 61847 on; an explicit port that is taken is an error."""
+    from weaver.errors import WeaverError
+
+    app = App()
+    first = make_server(app)
+    try:
+        taken = first.server_address[1]
+        assert first.server_address[0] == "127.0.0.1"
+        second = make_server(app)  # 'taken' is in use now: the next free port
+        try:
+            assert second.server_address[1] != taken
+        finally:
+            second.server_close()
+        with pytest.raises(WeaverError, match="in use"):
+            make_server(app, port=taken)
+    finally:
+        first.server_close()
 
 
 @needs_clang

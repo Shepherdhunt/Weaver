@@ -922,7 +922,7 @@ def build_parser() -> argparse.ArgumentParser:
     sp = add("serve", cmd_serve, "start the local web interface")
     sp.add_argument("project", nargs="?", help="project directory or weaver.yaml to open (default: -C or cwd)")
     sp.add_argument("--host", default="127.0.0.1", help="bind address (default: loopback only)")
-    sp.add_argument("--port", type=int, default=8765)
+    sp.add_argument("--port", type=int, help="port to bind (default: 61847, or the next free one; 0: any free port)")
     sp.add_argument("--open", action="store_true", help="open a browser")
     sp.add_argument(
         "--scope",

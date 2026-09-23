@@ -8,7 +8,6 @@
 
 // A page written by 'weaver export-ui' carries recorded answers instead of a server.
 const SNAP = window.WEAVER_SNAPSHOT || null;
-const TOKEN = SNAP ? "" : document.querySelector('meta[name="weaver-token"]').content;
 const CLASSES = ["read-only", "writes", "escapes", "reassigned", "unused"];
 const CLASS_LABEL = {
   "read-only": "read-only", writes: "writes through", escapes: "escapes",
@@ -33,7 +32,8 @@ const S = {
 // ---------------------------------------------------------------- utilities
 async function api(path, body) {
   if (SNAP) return snapApi(path, body);
-  const opt = { headers: { "X-Weaver-Token": TOKEN } };
+  // the session cookie authenticates; the custom header proves the request comes from this page
+  const opt = { headers: { "X-Weaver-Request": "1" }, credentials: "same-origin" };
   if (body !== undefined) {
     opt.method = "POST";
     opt.headers["Content-Type"] = "application/json";
@@ -41,12 +41,22 @@ async function api(path, body) {
   }
   const r = await fetch("/api/" + path, opt);
   const data = await r.json().catch(() => ({}));
+  if (r.status === 401 && data.signin) signedOut();
   if (!r.ok) {
     const e = new Error(data.error || r.statusText);
     e.data = data;
     throw e;
   }
   return data;
+}
+
+function signedOut() {
+  // the server restarted (new key) or this browser never opened the signed link
+  clear(document.getElementById("project-info")); clear(document.getElementById("top-actions"));
+  clear(document.getElementById("app")).append(h("div", { class: "welcome" },
+    h("h1", { text: "Open the link from the terminal" }),
+    h("p", { class: "lead", text: "This Weaver session is protected by a key that only the terminal running " +
+      "“weaver serve” shows. Open the link it printed (it ends in ?token=…). If the server was restarted, the key changed." })));
 }
 
 function h(tag, props, ...kids) {

@@ -212,8 +212,11 @@ the target, the parameter is still by value). Revalidation rebuilds the snapshot
 current tree and compares the configured runs. The report says plainly when the runs agree but
 the pointer facts do not.
 
-**The web interface is a view over the same evidence.** It binds to loopback. It requires a
-per-process token and a loopback `Host` header, accepts only JSON POSTs, and sends a strict CSP.
+**The web interface is a view over the same evidence.** It binds to loopback, on port 61847 or the
+next free one. A per-process key reaches the browser only through the link printed in the
+terminal, which exchanges it for an HttpOnly, SameSite=Strict cookie. API calls need that cookie
+plus a custom request header, or the key itself (scripts). The server also requires a loopback
+`Host` header, accepts only JSON POSTs, and sends a strict CSP.
 It inserts project text only through `textContent`. Long operations are background jobs with
 streamed logs, and only one modifying operation runs at a time.
 

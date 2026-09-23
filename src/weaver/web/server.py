@@ -1,23 +1,31 @@
 """``weaver serve``: a local web interface over the same evidence as the CLI.
 
-Security model: the server binds to 127.0.0.1 by default, rejects requests
-whose Host header is not the loopback address it serves (DNS-rebinding
-defence), and requires a per-process random token on every API call.  The
-token is embedded in the page it serves; other origins cannot read it.
-Long operations run as background jobs with streamed logs; only one
-modifying job runs at a time.
+Security model: the server binds to 127.0.0.1 by default, on an uncommon
+port (61847, or the next free one), and rejects requests whose Host header is
+not the loopback address it serves (DNS-rebinding defence).  The port is not a
+secret: any account on the machine can find it.  What protects the session is
+a per-process random key that only the terminal that started the server sees:
+``weaver serve`` prints a link carrying it, opening that link sets an HttpOnly,
+SameSite=Strict cookie, and every API call needs the cookie plus a custom
+request header (which a cross-origin page cannot send without a CORS preflight
+this server never grants), or the key itself in ``X-Weaver-Token`` (scripts).
+The page never contains the key.  Long operations run as background jobs with
+streamed logs; only one modifying job runs at a time.
 """
 
 from __future__ import annotations
 
+import errno
 import json
 import mimetypes
 import secrets
+import sys
 import threading
 import time
 import traceback
 import uuid
 from http import HTTPStatus
+from http.cookies import CookieError, SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, Callable
@@ -28,6 +36,15 @@ from weaver.errors import ConfigError, WeaverError
 from weaver.web import api
 
 STATIC = Path(__file__).resolve().parent / "static"
+DEFAULT_PORT = 61847  # uncommon, above IANA's registered range; the next free port is used if it is taken
+PORT_TRIES = 20
+
+SIGNED_OUT = """<!doctype html><html lang="en"><head><meta charset="utf-8"><title>Weaver</title>
+<meta name="viewport" content="width=device-width, initial-scale=1"><link rel="stylesheet" href="/static/app.css">
+</head><body><main class="app"><div class="welcome"><h1>Open the link from the terminal</h1>
+<p class="lead">This Weaver session is protected by a key that only the terminal running
+<code>weaver serve</code> shows. Open the link it printed (it ends in <code>?token=</code>&hellip;).
+If the server was restarted, the key changed: use the new link.</p></div></main></body></html>"""
 
 
 class Job:
@@ -129,6 +146,9 @@ def _json(obj: Any) -> bytes:
 def make_handler(app: App, host: str) -> type[BaseHTTPRequestHandler]:
     names = {"127.0.0.1", "localhost", "[::1]", f"[{host}]" if ":" in host else host}
 
+    def cookie_name(port: int) -> str:
+        return f"weaver-{port}"  # cookies are shared across ports of one host; the name keeps servers apart
+
     class Handler(BaseHTTPRequestHandler):
         server_version = "weaver"
 
@@ -162,16 +182,30 @@ def make_handler(app: App, host: str) -> type[BaseHTTPRequestHandler]:
             raw = self.rfile.read(n) if n else b"{}"
             return json.loads(raw or b"{}")
 
+        def _session(self) -> bool:
+            """Does the request carry this process's key in its session cookie?"""
+            try:
+                jar = SimpleCookie(self.headers.get("Cookie") or "")
+            except CookieError:
+                return False
+            c = jar.get(cookie_name(self.server.server_address[1]))
+            return c is not None and secrets.compare_digest(c.value, app.token)
+
         def _guard(self) -> bool:
             port = self.server.server_address[1]
             if self.headers.get("Host") not in {f"{n}:{port}" for n in names}:
                 self._error(HTTPStatus.FORBIDDEN, "unexpected Host header")
                 return False
-            if self.path.startswith("/api/") and not secrets.compare_digest(
-                self.headers.get("X-Weaver-Token", ""), app.token
-            ):
-                self._error(HTTPStatus.FORBIDDEN, "missing or invalid token")
-                return False
+            if self.path.startswith("/api/"):
+                key = secrets.compare_digest(self.headers.get("X-Weaver-Token", ""), app.token)
+                browser = self.headers.get("X-Weaver-Request") == "1" and self._session()
+                if not (key or browser):
+                    self._error(
+                        HTTPStatus.UNAUTHORIZED,
+                        "not signed in to this Weaver session: open the link 'weaver serve' printed",
+                        signin=True,
+                    )
+                    return False
             return True
 
         def do_GET(self) -> None:  # noqa: N802
@@ -192,7 +226,7 @@ def make_handler(app: App, host: str) -> type[BaseHTTPRequestHandler]:
             q = {k: v[0] for k, v in parse_qs(u.query).items()}
             try:
                 if method == "GET" and not u.path.startswith("/api/"):
-                    return self._static(u.path)
+                    return self._static(u.path, q)
                 body = self._body() if method == "POST" else {}
                 out = route(app, method, u.path, q, body)
                 self._send(HTTPStatus.OK, _json(out))
@@ -205,10 +239,26 @@ def make_handler(app: App, host: str) -> type[BaseHTTPRequestHandler]:
             except Exception as e:  # noqa: BLE001
                 self._error(HTTPStatus.INTERNAL_SERVER_ERROR, f"{type(e).__name__}: {e}")
 
-        def _static(self, path: str) -> None:
+        def _static(self, path: str, q: dict[str, str]) -> None:
             if path in ("/", "/index.html"):
-                html = (STATIC / "index.html").read_text().replace("__WEAVER_TOKEN__", app.token)
-                return self._send(HTTPStatus.OK, html.encode(), "text/html; charset=utf-8")
+                if "token" in q:
+                    if not secrets.compare_digest(q["token"], app.token):
+                        return self._send(HTTPStatus.UNAUTHORIZED, SIGNED_OUT.encode(), "text/html; charset=utf-8")
+                    # exchange the key for a cookie, and take it out of the address bar and history
+                    self.send_response(HTTPStatus.SEE_OTHER)
+                    self.send_header(
+                        "Set-Cookie",
+                        f"{cookie_name(self.server.server_address[1])}={app.token}; Path=/; HttpOnly; SameSite=Strict",
+                    )
+                    self.send_header("Location", "/")
+                    self.send_header("Content-Length", "0")
+                    self.send_header("Cache-Control", "no-store")
+                    self.send_header("Referrer-Policy", "no-referrer")
+                    self.end_headers()
+                    return None
+                if not self._session():
+                    return self._send(HTTPStatus.UNAUTHORIZED, SIGNED_OUT.encode(), "text/html; charset=utf-8")
+                return self._send(HTTPStatus.OK, (STATIC / "index.html").read_bytes(), "text/html; charset=utf-8")
             name = path.removeprefix("/static/")
             p = (STATIC / name).resolve()
             if not str(p).startswith(str(STATIC) + "/") or not p.is_file():
@@ -414,23 +464,41 @@ def route(app: App, method: str, path: str, q: dict[str, str], body: dict[str, A
     raise FileNotFoundError(f"no route {method} {path}")
 
 
-def make_server(app: App, host: str = "127.0.0.1", port: int = 8765) -> ThreadingHTTPServer:
-    httpd = ThreadingHTTPServer((host, port), make_handler(app, host))
-    httpd.daemon_threads = True
-    return httpd
+class _Server(ThreadingHTTPServer):
+    daemon_threads = True
+    # On Windows SO_REUSEADDR lets a second socket bind a port that is already listening; never ask for it there.
+    allow_reuse_address = sys.platform != "win32"
+
+
+def make_server(app: App, host: str = "127.0.0.1", port: int | None = None) -> ThreadingHTTPServer:
+    """Bind ``port`` exactly (0: any free port), or by default the first free port from DEFAULT_PORT."""
+    handler = make_handler(app, host)
+    candidates = [port] if port is not None else [*range(DEFAULT_PORT, DEFAULT_PORT + PORT_TRIES), 0]
+    for p in candidates:
+        try:
+            return _Server((host, p), handler)
+        except OSError as e:
+            if port is not None and e.errno == errno.EADDRINUSE:
+                raise WeaverError(f"port {port} on {host} is in use; omit --port to use a free one") from e
+            if port is not None or e.errno not in (errno.EADDRINUSE, errno.EACCES):
+                raise
+    raise WeaverError(f"no free port on {host}")  # pragma: no cover - port 0 always binds
 
 
 def serve(
     project_path: str | None,
     host: str = "127.0.0.1",
-    port: int = 8765,
+    port: int | None = None,
     open_browser: bool = False,
     scope: list[str] | None = None,
 ) -> None:
     app = App(project_path, scope)
     httpd = make_server(app, host, port)
-    url = f"http://{'localhost' if host in ('127.0.0.1', '::1') else host}:{httpd.server_address[1]}/"
-    print(f"Weaver web interface on {url}  (Ctrl-C to stop)", flush=True)
+    base = f"http://{'localhost' if host in ('127.0.0.1', '::1') else host}:{httpd.server_address[1]}/"
+    url = f"{base}?token={app.token}"
+    print(f"Weaver web interface on {base}  (Ctrl-C to stop)", flush=True)
+    print("Open this link to sign in (keep it private; it changes on every start):", flush=True)
+    print(f"  {url}", flush=True)
     if host not in ("127.0.0.1", "localhost", "::1"):
         print(
             "WARNING: listening beyond loopback; anyone who can reach this port and load the page can drive "
