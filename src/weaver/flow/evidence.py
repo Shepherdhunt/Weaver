@@ -212,3 +212,18 @@ def _safe_name(name: str) -> str:
     from weaver.flow.svf import _safe
 
     return _safe(name)
+
+
+def declared_targets(fe: Any, f: dict[str, Any]) -> list[dict[str, Any]] | None:
+    """Points-to targets of a pointer declaration from SVF evidence (None if not mapped)."""
+    if f["kind"] == "parameter" and f.get("function") is not None:
+        t = fe.param_targets(f["function"], f.get("param_index", 0))
+        return [fe.describe(o) for o in sorted(t)] if t is not None else None
+    # A local/global pointer variable: its stack/global object holds the pointer values.
+    holders = fe.objects_for_decl(f.get("file"), f.get("line"), f.get("name"))
+    if not holders:
+        return None
+    pts: set[int] = set()
+    for h in holders:
+        pts.update(fe.nodes.get(h, {}).get("pts", []))
+    return [fe.describe(o) for o in sorted(pts)]

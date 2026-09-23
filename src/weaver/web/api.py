@@ -32,6 +32,7 @@ class Cache:
         self.inv: dict[str, Any] | None = None
         self.ctx: Any = None  # the RecipeContext of the cached evaluation (flow evidence loaded once)
         self.simplify: dict[str, Any] = {}  # profile -> simplification report for the cached inventory
+        self.risk: dict[str, Any] | None = None  # the risk report for the cached inventory
         # Path prefixes the views show (large projects: a subsystem at a time).  Recipes still see the
         # whole program; only findings under these prefixes are evaluated and listed.
         self.scope = scope or []
@@ -62,7 +63,7 @@ class Cache:
                         "edits": len(res.edits),
                         "preconditions": [p.to_json() for p in res.preconditions],
                     }
-            self.key, self.verdicts, self.inv, self.simplify = key, verdicts, inv, {}
+            self.key, self.verdicts, self.inv, self.simplify, self.risk = key, verdicts, inv, {}, None
         assert self.inv is not None
         return self.inv, self.verdicts
 
@@ -146,9 +147,11 @@ def pointer_list(project: Project, cache: Cache) -> dict[str, Any]:
     from weaver.ledger import Ledger
 
     inv, verdicts = cache.get(project)
+    risk = _risk_by_id(project, cache)
     rows = []
     for f in inv["findings"]:
         v = verdicts.get(f["id"], {})
+        rk = risk.get(f["id"]) or {}
         rows.append(
             {
                 "id": f["id"],
@@ -162,6 +165,8 @@ def pointer_list(project: Project, cache: Cache) -> dict[str, Any]:
                 "class": access_class(f),
                 "evidence": f.get("evidence_status"),
                 "uses": len(f.get("uses", [])),
+                "risk": rk.get("score"),
+                "risk_level": rk.get("level"),
                 "recipes": {
                     k: {
                         "eligible": x["eligible"],
@@ -231,6 +236,7 @@ def pointer_detail(project: Project, fid: str, cache: Cache) -> dict[str, Any]:
         "excerpt": {"file": rel, "start": lo, "lines": source_lines(project.root, rel, lo, min(hi, lo + 80))},
         "svf_targets": svf_targets,
         "points_to": points_to,
+        "risk": _risk_by_id(project, cache).get(f["id"]),
         "recipes": verdicts.get(f["id"], {}),
         "contracts": contracts,
         "callers": callers,
@@ -272,6 +278,20 @@ def _call_arguments(project: Project, inv: dict[str, Any], f: dict[str, Any]) ->
     return out
 
 
+def risk_view(project: Project, cache: Cache) -> dict[str, Any]:
+    """Every pointer in the view's scope scored for risk, with totals per function, file and module."""
+    from weaver.risk import report
+
+    inv, verdicts = cache.get(project)
+    if cache.risk is None:
+        cache.risk = report(project, inv, cache.in_scope, cache.ctx, verdicts)
+    return cache.risk
+
+
+def _risk_by_id(project: Project, cache: Cache) -> dict[str, dict[str, Any]]:
+    return {r["id"]: r for r in risk_view(project, cache)["pointers"]}
+
+
 def simplify_view(project: Project, cache: Cache, profile: str | None = None) -> dict[str, Any]:
     """The simplification report for one target profile, limited to the view's scope."""
     from weaver.simplify import check
@@ -300,7 +320,7 @@ def _points_to(project: Project, inv: dict[str, Any], f: dict[str, Any], cache: 
     For each backend: what the pointer may point to, and (for parameters) whether a call may
     write that target, with the backend's own reason.  ``agree`` compares the two answers.
     """
-    from weaver.flow.evidence import load_flow
+    from weaver.flow.evidence import declared_targets, load_flow
     from weaver.flow.gcc_pta import SPECIAL, gcc_profile
     from weaver.flow.program import may_modify
     from weaver.recipes import RecipeContext
@@ -321,7 +341,7 @@ def _points_to(project: Project, inv: dict[str, Any], f: dict[str, Any], cache: 
             if fe is None:
                 row["svf"] = {"status": "missing", "note": "no current SVF run for this program (run Points-to)"}
             else:
-                objs = _svf_targets_for(fe, f)
+                objs = declared_targets(fe, f)
                 row["svf"] = {"status": "current" if fe.complete else "incomplete", "targets": objs}
                 if objs is None:
                     row["svf"]["note"] = "SVF's results do not map this declaration"
@@ -363,28 +383,14 @@ def _points_to(project: Project, inv: dict[str, Any], f: dict[str, Any], cache: 
     return rows
 
 
-def _svf_targets_for(fe: Any, f: dict[str, Any]) -> list[dict[str, Any]] | None:
-    """Points-to targets of a pointer declaration from SVF evidence (None if not mapped)."""
-    if f["kind"] == "parameter" and f.get("function") is not None:
-        t = fe.param_targets(f["function"], f.get("param_index", 0))
-        return [fe.describe(o) for o in sorted(t)] if t is not None else None
-    # A local/global pointer variable: its stack/global object holds the pointer values.
-    holders = fe.objects_for_decl(f.get("file"), f.get("line"), f.get("name"))
-    if not holders:
-        return None
-    pts: set[int] = set()
-    for h in holders:
-        pts.update(fe.nodes.get(h, {}).get("pts", []))
-    return [fe.describe(o) for o in sorted(pts)]
-
-
 def map_model(project: Project, cache: Cache) -> dict[str, Any]:
     """Files → functions → pointers, plus call edges, for the overview map."""
     inv, verdicts = cache.get(project)
+    risk = _risk_by_id(project, cache)
     files: dict[str, dict[str, Any]] = {}
 
     def fn_entry(file: str, fn: str | None) -> dict[str, Any]:
-        fe = files.setdefault(file, {"file": file, "functions": {}, "counts": {}})
+        fe = files.setdefault(file, {"file": file, "functions": {}, "counts": {}, "risk": {}})
         key = fn or "(file scope)"
         return fe["functions"].setdefault(key, {"name": key, "pointers": [], "calls": [], "callers": []})
 
@@ -403,10 +409,16 @@ def map_model(project: Project, cache: Cache) -> dict[str, Any]:
                 "eligible": any(x["eligible"] for x in v.values()),
                 "line": f.get("line"),
                 "type": f.get("type"),
+                "risk": (risk.get(f["id"]) or {}).get("score"),
+                "risk_level": (risk.get(f["id"]) or {}).get("level"),
             }
         )
         c = files[f["file"]]["counts"]
         c[cls] = c.get(cls, 0) + 1
+        lv = (risk.get(f["id"]) or {}).get("level")
+        if lv:
+            rc = files[f["file"]]["risk"]
+            rc[lv] = rc.get(lv, 0) + 1
     for key, fsum in inv.get("functions", {}).items():
         file, _, name = key.partition("::")
         if not cache.in_scope(file):
@@ -428,7 +440,7 @@ def map_model(project: Project, cache: Cache) -> dict[str, Any]:
     for file in sorted(files):
         fe = files[file]
         fns = sorted(fe["functions"].values(), key=lambda x: (x.get("line") or 0, x["name"]))
-        out.append({"file": file, "counts": fe["counts"], "functions": fns})
+        out.append({"file": file, "counts": fe["counts"], "risk": fe["risk"], "functions": fns})
     return {"files": out}
 
 

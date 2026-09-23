@@ -438,7 +438,7 @@ function renderWorkspace() {
 }
 
 const VIEWS = [
-  ["map", "Map"], ["graph", "Graph"], ["source", "Source"], ["simplify", "Simplify"], ["changes", "Changes"], ["ledger", "Transactions"],
+  ["map", "Map"], ["risk", "Risk"], ["graph", "Graph"], ["source", "Source"], ["simplify", "Simplify"], ["changes", "Changes"], ["ledger", "Transactions"],
 ];
 
 function renderTabs() {
@@ -534,7 +534,7 @@ function renderView() {
       "show what they do and how to run them locally.");
     v.append(note);
   }
-  ({ map: renderMap, graph: renderGraph, source: renderSource, simplify: renderSimplify, changes: renderChanges, ledger: renderLedger })[S.view](v);
+  ({ map: renderMap, risk: renderRisk, graph: renderGraph, source: renderSource, simplify: renderSimplify, changes: renderChanges, ledger: renderLedger })[S.view](v);
 }
 
 // ---------------------------------------------------------------- map view
@@ -543,24 +543,34 @@ function renderMap(v) {
   const total = S.pointers.length + S.removed.length;
   const pct = total ? Math.round((100 * S.removed.length) / total) : 0;
   const elig = S.pointers.filter((p) => Object.values(p.recipes).some((r) => r.eligible)).length;
+  const byRisk = S.mapColor === "risk";
   v.append(h("div", { class: "map-head" },
+    h("div", { class: "seg", role: "group", "aria-label": "Colour pointers by" },
+      h("button", { class: "seg-b" + (byRisk ? "" : " on"), "aria-pressed": !byRisk, onclick: () => { S.mapColor = "class"; renderView(); } }, "Behaviour"),
+      h("button", { class: "seg-b" + (byRisk ? " on" : ""), "aria-pressed": byRisk, onclick: () => { S.mapColor = "risk"; renderView(); } }, "Risk")),
     h("div", { class: "legend" },
-      CLASSES.map((c) => h("span", { title: CLASS_HELP[c] }, h("span", { class: `dot cls-${c}` }), CLASS_LABEL[c])),
+      byRisk
+        ? RISK_LEVELS.map((l) => h("span", { title: `score ${RISK_RANGE[l]}` }, h("span", { class: `dot risk-${l}` }), `${l} risk`))
+        : CLASSES.map((c) => h("span", { title: CLASS_HELP[c] }, h("span", { class: `dot cls-${c}` }), CLASS_LABEL[c])),
       h("span", {}, h("span", { class: "dot", style: { color: "var(--c-eligible)" } }), "ring = eligible refactor"),
       h("span", {}, h("span", { class: "dot", style: { color: "var(--faint)" } }), "dashed = removed")),
     h("div", { class: "progress", title: "pointers removed by accepted transactions" },
       `${S.removed.length} removed · ${S.pointers.length} remaining · ${elig} eligible`,
       h("div", { class: "bar" }, h("i", { style: { width: pct + "%" } })), `${pct}%`)));
-  const grid = h("div", { class: "map" });
+  const grid = h("div", { class: "map" + (byRisk ? " by-risk" : "") });
   const removedBy = {};
   for (const r of S.removed) (removedBy[`${r.file}::${r.function}`] ||= []).push(r);
   for (const f of (S.map && S.map.files) || []) {
     const counts = f.counts || {};
     const n = Object.values(counts).reduce((a, b) => a + b, 0);
+    const rk = f.risk || {};
     const card = h("div", { class: "fcard" },
       h("h3", {}, h("span", { text: f.file }), h("span", { class: "cnt", text: `${n} pointer(s)` })),
-      h("div", { class: "stack", title: Object.entries(counts).map(([k, c]) => `${c} ${CLASS_LABEL[k]}`).join(", ") },
-        CLASSES.filter((c) => counts[c]).map((c) => h("i", { style: { width: `${(100 * counts[c]) / Math.max(n, 1)}%`, background: `var(--c-${c})` } }))));
+      byRisk
+        ? h("div", { class: "stack", title: RISK_LEVELS.filter((l) => rk[l]).map((l) => `${rk[l]} ${l} risk`).join(", ") },
+            RISK_LEVELS.filter((l) => rk[l]).map((l) => h("i", { style: { width: `${(100 * rk[l]) / Math.max(n, 1)}%`, background: `var(--risk-${l})` } })))
+        : h("div", { class: "stack", title: Object.entries(counts).map(([k, c]) => `${c} ${CLASS_LABEL[k]}`).join(", ") },
+            CLASSES.filter((c) => counts[c]).map((c) => h("i", { style: { width: `${(100 * counts[c]) / Math.max(n, 1)}%`, background: `var(--c-${c})` } }))));
     for (const fn of f.functions) {
       const key = `${f.file}::${fn.name}`;
       const ptrs = fn.pointers.filter((p) => visible.has(p.id));
@@ -574,8 +584,9 @@ function renderMap(v) {
             fn.callers && fn.callers.length ? `called by ${fn.callers.length}` : null,
             fn.indirect_calls ? `${fn.indirect_calls} indirect` : null].filter(Boolean).join(" · ") })),
         h("div", { class: "chips" },
-          ptrs.map((p) => h("button", { class: `chip ${p.class}${p.eligible ? " elig" : ""}${S.selected === p.id ? " sel" : ""}`,
-            title: `${p.name}: ${p.type} (${p.kind}) — ${CLASS_HELP[p.class] || p.class}${p.eligible ? " — eligible refactor" : ""}`,
+          ptrs.map((p) => h("button", { class: `chip ${p.class} r-${p.risk_level || "none"}${p.eligible ? " elig" : ""}${S.selected === p.id ? " sel" : ""}`,
+            title: `${p.name}: ${p.type} (${p.kind}) — ${CLASS_HELP[p.class] || p.class}` +
+              (p.risk_level ? ` — ${p.risk_level} risk (score ${p.risk})` : "") + `${p.eligible ? " — eligible refactor" : ""}`,
             onclick: () => select(p.id) }, p.name || "?", h("span", { class: "k", text: p.kind === "parameter" ? "param" : p.kind === "local" ? "" : p.kind }))),
           gone.map((r) => h("span", { class: "chip removed", title: `removed by ${r.txn} (${r.recipe})` }, r.name))));
       card.append(row);
@@ -910,6 +921,15 @@ function renderDetail() {
       f.function ? ` · in ${f.function}()` : "", ` · evidence ${f.evidence_status}`,
       f.typedef_hidden ? " · hidden behind a typedef" : ""),
   );
+  if (d.risk) {
+    const r = d.risk;
+    box.append(h("div", { class: "section" },
+      h("h4", {}, "Risk ", riskPill(r.level), h("span", { class: "d-sub", text: ` score ${r.score}` })),
+      r.factors.length ? h("ul", { class: "risk-factors" }, r.factors.map((x) => h("li", {},
+        h("span", { class: "w", title: "weight", text: `+${x.weight}` }), h("b", { text: x.title }),
+        h("span", { class: "d-sub", text: " · " + x.evidence.join("; ") + (x.count > x.evidence.length ? ` (+${x.count - x.evidence.length} more)` : "") }))))
+        : h("div", { class: "d-sub", text: "No risk factor found." })));
+  }
   if (aiOn()) box.append(h("div", { class: "d-ai" }, h("button", { class: "btn small", onclick: () => explain(f.id),
     title: `Ask ${S.state.ai.provider} (${S.state.ai.model || "model not set"}) to explain this pointer. ` +
       "It receives this pointer's evidence and nearby source; it never edits." }, "Explain with AI")));
@@ -1078,6 +1098,111 @@ async function explain(fid) {
     const job = await api("explain", { finding: fid });
     followJob(job, (res) => modal("AI explanation (advisory)", [h("pre", { class: "diff", style: { whiteSpace: "pre-wrap" }, text: (res && res.text) || "" })], (close) => [h("button", { class: "btn", onclick: close }, "Close")]));
   } catch (e) { fail(e); }
+}
+
+// ---------------------------------------------------------------- risk view
+const RISK_LEVELS = ["high", "medium", "low"];
+const RISK_RANGE = { high: "7 or more", medium: "4 to 6", low: "0 to 3" };
+
+function riskPill(level) {
+  return h("span", { class: `risk-pill ${level}` }, h("span", { class: `dot risk-${level}` }), level);
+}
+
+// One tooltip for every chart mark: shown on hover and on keyboard focus, text only.
+function vizTip(el, lines) {
+  const show = (x, y) => {
+    let tip = document.getElementById("viz-tip");
+    if (!tip) { tip = h("div", { id: "viz-tip", role: "tooltip" }); document.body.append(tip); }
+    clear(tip);
+    lines.forEach((l, i) => tip.append(h(i === 0 ? "b" : "div", { text: l })));
+    tip.hidden = false;
+    const r = tip.getBoundingClientRect();
+    tip.style.left = Math.min(x + 12, innerWidth - r.width - 8) + "px";
+    tip.style.top = Math.min(y + 12, innerHeight - r.height - 8) + "px";
+  };
+  const hide = () => { const t = document.getElementById("viz-tip"); if (t) t.hidden = true; };
+  el.addEventListener("pointermove", (e) => show(e.clientX, e.clientY));
+  el.addEventListener("pointerleave", hide);
+  el.addEventListener("focus", () => { const r = el.getBoundingClientRect(); show(r.right, r.top); });
+  el.addEventListener("blur", hide);
+  return el;
+}
+
+async function renderRisk(v) {
+  let rep;
+  try { rep = await api("risk"); } catch (e) { return fail(e); }
+  const st = S.risk = { level: null, factor: null, q: "", all: false, by: "modules", ...(S.risk || {}) };
+  const pad = h("div", { class: "pad risk" });
+  v.append(pad);
+  const sm = rep.summary;
+  const draw = () => {
+    clear(pad);
+    // headline numbers: a stat tile per level
+    pad.append(h("div", { class: "tiles" },
+      h("div", { class: "tile" }, h("div", { class: "t-label", text: "Pointers scored" }), h("div", { class: "t-value", text: sm.pointers.toLocaleString() })),
+      RISK_LEVELS.map((l) => h("button", { class: "tile" + (st.level === l ? " on" : ""), "aria-pressed": st.level === l,
+        title: `score ${RISK_RANGE[l]} — show only these`, onclick: () => { st.level = st.level === l ? null : l; draw(); } },
+        h("div", { class: "t-label" }, h("span", { class: `dot risk-${l}` }), `${l[0].toUpperCase()}${l.slice(1)} risk`),
+        h("div", { class: "t-value", text: sm[l].toLocaleString() })))),
+      h("p", { class: "d-sub", text: "Each factor below is a fact Weaver established for the pointer, with a weight; the score is their sum " +
+        `(high: ${RISK_RANGE.high}, medium: ${RISK_RANGE.medium}). A guide for ordering the work, not a probability of failure.` }));
+
+    // what makes pointers risky: one bar per factor (single series)
+    const factors = Object.entries(rep.factors).filter(([, f]) => f.pointers).sort((a, b) => b[1].pointers - a[1].pointers || b[1].weight - a[1].weight);
+    const fmax = Math.max(1, ...factors.map(([, f]) => f.pointers));
+    const fchart = h("div", { class: "hbars", role: "list" }, factors.map(([id, f]) => vizTip(h("button", {
+      class: "hbar" + (st.factor === id ? " on" : ""), role: "listitem", "aria-pressed": st.factor === id,
+      "aria-label": `${f.title}: ${f.pointers} pointers, weight ${f.weight}`, onclick: () => { st.factor = st.factor === id ? null : id; draw(); } },
+      h("span", { class: "hb-label", text: f.title }),
+      h("span", { class: "hb-track" }, h("i", { style: { width: `${(100 * f.pointers) / fmax}%` } }), h("span", { class: "hb-val", text: f.pointers.toLocaleString() }))),
+      [`${f.pointers.toLocaleString()} pointer(s)`, `${f.title} · weight +${f.weight}`, f.why])));
+
+    // where the risk is: stacked bars by level for the top modules or files
+    const groups = (st.by === "files" ? rep.files : rep.modules).slice(0, 10);
+    const gmax = Math.max(1, ...groups.map((g) => g.pointers));
+    const where = h("div", { class: "hbars stacked", role: "list" }, groups.map((g) => h("div", { class: "hbar", role: "listitem" },
+      h("span", { class: "hb-label mono", title: g.name, text: g.name }),
+      h("span", { class: "hb-track" },
+        h("span", { class: "hb-stack", style: { width: `${(100 * g.pointers) / gmax}%` } },
+          RISK_LEVELS.filter((l) => g[l]).map((l) => vizTip(h("i", { tabindex: 0, class: `risk-${l}`, style: { flexGrow: g[l] },
+            "aria-label": `${g.name}: ${g[l]} ${l}-risk pointer(s)` }), [`${g[l].toLocaleString()} ${l}-risk pointer(s)`, g.name, `total score ${g.score.toLocaleString()}`]))),
+        h("span", { class: "hb-val", text: g.pointers.toLocaleString() })))));
+    pad.append(h("div", { class: "risk-charts" },
+      h("div", { class: "card" }, h("h3", { text: "What makes pointers risky" }),
+        h("p", { class: "d-sub", text: "Pointers with each factor. Select one to list them." }), fchart),
+      h("div", { class: "card" }, h("div", { class: "card-head" }, h("h3", { text: "Where the risk is" }),
+        h("div", { class: "seg", role: "group", "aria-label": "Group by" },
+          ["modules", "files"].map((k) => h("button", { class: "seg-b" + (st.by === k ? " on" : ""), "aria-pressed": st.by === k, onclick: () => { st.by = k; draw(); } }, k)))),
+        h("div", { class: "legend" }, RISK_LEVELS.map((l) => h("span", {}, h("span", { class: `swatch risk-${l}` }), `${l} risk`))),
+        h("p", { class: "d-sub", text: `Pointers per ${st.by === "files" ? "file" : "module"}, ranked by total score.` }), where)));
+
+    // the ranked list
+    const search = h("input", { type: "search", id: "risk-q", value: st.q, placeholder: "Filter by pointer, function or file…", "aria-label": "Filter pointers",
+      oninput: (e) => { st.q = e.target.value; drawRows(); } });
+    pad.append(h("div", { class: "simp-tools" }, search,
+      st.level ? h("button", { class: "filter on", onclick: () => { st.level = null; draw(); } }, `${st.level} risk ✕`) : null,
+      st.factor ? h("button", { class: "filter on", onclick: () => { st.factor = null; draw(); } }, `${rep.factors[st.factor].title} ✕`) : null),
+      h("div", { class: "table-wrap", id: "risk-rows" }));
+    drawRows();
+  };
+  const drawRows = () => {
+    const box = clear(document.getElementById("risk-rows"));
+    const q = st.q.toLowerCase();
+    const rows = rep.pointers.filter((r) => (!st.level || r.level === st.level) && (!st.factor || r.factors.some((x) => x.id === st.factor)) &&
+      (!q || `${r.name} ${r.function || ""} ${r.file}`.toLowerCase().includes(q)));
+    const limit = st.all ? rows.length : 200;
+    box.append(h("table", { class: "table" },
+      h("thead", {}, h("tr", {}, ["Risk", "Score", "Pointer", "Where", "Factors"].map((t) => h("th", { text: t })))),
+      h("tbody", {}, rows.slice(0, limit).map((r) => h("tr", { class: "click" + (S.selected === r.id ? " sel" : ""), tabindex: 0,
+        onclick: () => select(r.id, { keepView: true }), onkeydown: (e) => { if (e.key === "Enter") select(r.id, { keepView: true }); } },
+        h("td", {}, riskPill(r.level)), h("td", { class: "num", text: r.score }),
+        h("td", { class: "mono", text: r.name || "?" }),
+        h("td", { class: "mono", text: `${r.file}:${r.line}${r.function ? " " + r.function + "()" : ""}` }),
+        h("td", {}, r.factors.map((x) => h("span", { class: "tag", title: x.evidence.join("; "), text: x.title }))))))));
+    if (rows.length > limit) box.append(h("button", { class: "btn small", onclick: () => { st.all = true; drawRows(); } }, `Show all ${rows.length}`));
+    if (!rows.length) box.append(h("div", { class: "d-sub", text: "No pointer matches." }));
+  };
+  draw();
 }
 
 // ---------------------------------------------------------------- simplify view
@@ -1368,7 +1493,7 @@ function runLocally() {
 
 function switchDataset(i) {
   Object.assign(S, { dataset: i, selected: null, detail: null, source: null, sourceFile: null, focusLine: null,
-    impact: null, view: "map", graphMode: "auto", map: null, pointers: [], removed: [], simplify: null });
+    impact: null, view: "map", graphMode: "auto", map: null, pointers: [], removed: [], simplify: null, risk: null });
   S.filters = { classes: new Set(), eligible: false, q: "", kinds: new Set() };
   try { localStorage.setItem("weaver-snapshot-dataset", snapData().id); } catch (e) { /* a convenience only */ }
   boot();

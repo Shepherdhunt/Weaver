@@ -133,6 +133,7 @@ Task ownership and scale make the interface recipes usable on multi-task program
 | `report.py` | tracker roadmap | `weaver report`: inventory and rejection report for a scope of the project. |
 | `flow/tasks.py` | tracker §5 | Task model: declared threads of control checked against thread starts and entry points, per-context write summaries, thread-escape analysis, and the concurrent-writer query behind `weaver tasks` and `SI.no-concurrent-writers`. |
 | `analysis/identindex.py` | tracker §§3, 9 | Identifier-to-files index for whole-tree textual reference scans, cached on disk by path, size and modification time. |
+| `risk.py` | — | Pointer risk: factors from uses, points-to targets, recipe verdicts and evidence status, their weights and evidence; scores, levels and totals per function, file and module. |
 | `simplify.py` | tracker roadmap | The simplification checker: rule catalogue, target profiles (CLite provisional, no pointers, modular redesign, project-defined), and each function's remaining constructs from the inventory's pointer operations, calls, writes and per-function AST constructs. |
 | `web/export.py` | — | `weaver export-ui`: records the interface's read-only answers (optionally for a scope) into one HTML page that needs no server. |
 | `testdetect.py`, `settings.py` | tracker §7 | Detecting a project's test commands (Make, CTest, Meson, scripts), and editing validation commands and the acceptance policy in `weaver.yaml` with a backup and reload check. |
@@ -321,6 +322,15 @@ They also get the same evidence slice and the same read-only tools. An answer mi
 flagged, and the transcript records the provider, model and guide version. The feature is off
 unless the project enables it. Keys stay in the environment or in a per-user file outside the
 project, and plain HTTP is allowed only to a server on the same machine.
+
+**Risk is a transparent ordering, not a prediction.** Each factor is a fact Weaver already
+establishes (a cast to an integer, pointer arithmetic, an unknown or heap target, a concurrent
+writer from the task model, an escape) with a fixed weight, and the score is their sum. The
+weights order the work; they are not calibrated probabilities, and every factor is shown with the
+line or analysis behind it. Comparisons with a null pointer constant are now recorded as such on
+`compare` uses, so null tests spelled `p != NULL` are not counted as identity comparisons. Level
+colours form a one-hue ordinal ramp, validated for both themes, and a level is always named next
+to its colour.
 
 **Simplification is measured against a chosen target, not certified.** CLite is one target; often
 the goal is simpler C that can be redesigned into modules. The checker reuses facts the inventory

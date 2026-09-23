@@ -564,6 +564,36 @@ def cmd_ai(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_risk(args: argparse.Namespace) -> int:
+    """Every pointer scored by the risk factors Weaver established for it, ranked."""
+    from weaver.analysis.inventory import load_inventory
+    from weaver.risk import RISK_NOTE, report
+
+    proj = _project(args)
+    scope = args.scope or []
+    rep = report(proj, load_inventory(proj), lambda f: not scope or any(f.startswith(s) for s in scope))
+    rows = [r for r in rep["pointers"] if not args.level or r["level"] == args.level]
+    if args.json:
+        _print_json({**rep, "pointers": rows})
+        return 0
+    sm = rep["summary"]
+    print(f"{sm['pointers']} pointer(s): {sm['high']} high, {sm['medium']} medium, {sm['low']} low risk")
+    print(f"  {RISK_NOTE}")
+    print("\nFactors (pointers, weight):")
+    for f in sorted(rep["factors"].values(), key=lambda v: -v["pointers"]):
+        if f["pointers"]:
+            print(f"  {f['pointers']:>6}  +{f['weight']}  {f['title']}")
+    print(f"\nMost at risk (first {min(args.top, len(rows))} of {len(rows)}):")
+    for r in rows[: args.top]:
+        where = f"{r['file']}:{r['line']}" + (f" {r['function']}()" if r.get("function") else "")
+        print(f"  {r['score']:>3} {r['level']:<6} {r['name']:<24} {where}")
+        print(f"        {'; '.join(x['title'] + ' (' + x['evidence'][0] + ')' for x in r['factors'])}")
+    print("\nBy module (total score, pointers):")
+    for g in rep["modules"][:8]:
+        print(f"  {g['score']:>6} {g['pointers']:>5}  {g['name']}  ({g['high']} high, {g['medium']} medium)")
+    return 0
+
+
 def cmd_simplify(args: argparse.Namespace) -> int:
     """Which constructs stand between each function and a target profile (CLite or a simplification goal)."""
     from weaver.analysis.inventory import load_inventory
@@ -1013,6 +1043,12 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--fragment", action="store_true", help="leave out <html>, <head> and <body> (the host adds them)")
     sp.add_argument("--repo", help="git URL the page's run-it-locally steps clone")
     sp.add_argument("--branch", help="branch the page's run-it-locally steps check out")
+
+    sp = add("risk", cmd_risk, "pointers ranked by the risk factors Weaver established for each, and why")
+    sp.add_argument("--scope", action="append", help="only pointers under this path prefix (repeatable)")
+    sp.add_argument("--level", choices=["high", "medium", "low"])
+    sp.add_argument("--top", type=int, default=15, help="pointers to list (default 15)")
+    sp.add_argument("--json", action="store_true")
 
     sp = add("simplify", cmd_simplify, "constructs standing between each function and a target (CLite or a goal)")
     sp.add_argument("--profile", help="clite-provisional, pointer-free, modular, or a profile from weaver.yaml")

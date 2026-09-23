@@ -197,8 +197,9 @@ Done:
 - SVF and GCC evidence side by side in the interface.
 - The simplification checker with target profiles (`weaver simplify`, the Simplify tab).
 
+- The risk view and risk report (`weaver risk`, the Risk tab, colour by risk on the Map).
+
 Next:
 
-1. The risk view and risk report.
-2. The output-parameter recipe.
-3. Several projects per server; `weaver doctor` and the container image.
+1. The output-parameter recipe.
+2. Several projects per server; `weaver doctor` and the container image.

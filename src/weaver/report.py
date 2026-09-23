@@ -137,6 +137,15 @@ def build_report(
     rep["recipes"] = recipes
     rep["candidates"] = rows
     rep["contracts"] = [c for c in check_contracts(project, inv) if c.get("status")]
+    from weaver.risk import report as risk_report
+
+    risk = risk_report(project, inv, lambda path: not scope or any(path.startswith(s) for s in scope), ctx)
+    rep["risk"] = {
+        "summary": risk["summary"],
+        "factors": {k: v["pointers"] for k, v in risk["factors"].items() if v["pointers"]},
+        "top": risk["pointers"][:25],
+        "files": risk["files"][:10],
+    }
     return rep
 
 
@@ -224,6 +233,34 @@ def render_markdown(rep: dict[str, Any]) -> str:
         + "."
     )
     L.append("")
+    risk = rep.get("risk")
+    if risk:
+        sm = risk["summary"]
+        L.append("## Risk")
+        L.append("")
+        L.append(
+            f"{sm['pointers']} pointer(s) scored: {sm['high']} high, {sm['medium']} medium, {sm['low']} low. "
+            "A score adds up the weights of the risk factors Weaver established for the pointer; it orders the "
+            "work and is not a probability of failure."
+        )
+        L.append("")
+        L.append(
+            "Factors: "
+            + ", ".join(f"{k} ({v})" for k, v in sorted(risk["factors"].items(), key=lambda kv: -kv[1]))
+            + "."
+        )
+        L.append("")
+        if risk["top"]:
+            L.append("| Score | Pointer | Where | Factors |")
+            L.append("|---|---|---|---|")
+            for r in risk["top"]:
+                facts = ", ".join(x["id"] for x in r["factors"])
+                L.append(
+                    f"| {r['score']} ({r['level']}) | `{r['name']}` | `{r['file']}:{r['line']}`"
+                    + (f" `{r['function']}()`" if r.get("function") else "")
+                    + f" | {facts} |"
+                )
+            L.append("")
     L.append("## Recipes")
     L.append("")
     L.append("| Recipe | Applicable | Eligible | Most common blockers | Would unlock alone |")

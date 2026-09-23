@@ -41,6 +41,7 @@ can be accepted. The optional LLM explains and recommends; it never edits or val
 | Validation (tracker §7) | Isolated baseline and candidate workspaces. The production compiler rebuilds every unit whose main file *or included headers* were edited. A mechanical re-check parses the patched AST again. Configured builds, tests and differential comparisons run in both workspaces; CTest and Meson results are compared test by test, so a test that already fails on the baseline is not blamed on the patch. An acceptance policy judges the results. |
 | **Validation strength** | Each validation and acceptance records whether anything ran the patched program (`behavioural`) or not (`compile-only`), shown on the card, the ledger, impact reports and the web interface. `weaver tests` and the setup form detect the project's test commands (Make `test`/`check`, CTest, Meson, test scripts); the web settings editor changes validation commands and the acceptance policy. |
 | **Contracts on borrowed pointers** | `--expect borrowed`: the target is never written and the pointer is never kept past the call, checked through casts, copies and callees. The cFS software-bus buffer (`SBBufPtr`) holds through nine pointers in `sample_app`. |
+| **Risk view** | `weaver risk` and the **Risk** tab rank every pointer by the risk factors Weaver established for it: conversions to and from integers, concurrent writers (task model), unknown targets, pointer arithmetic, reinterpreting casts, escapes, writes, heap targets, globals, function pointers, many targets, reassignment, null tests, identity comparisons and weak evidence. Each factor has a weight and its evidence; the score orders the work (it is not a probability of failure). Totals per function, file and module; the Map can be coloured by risk; `weaver report` includes the top pointers. |
 | **Simplification checker** | `weaver simplify` and the **Simplify** tab: every analysed function against a target profile, listing each construct the target excludes with its line (pointers, addresses, pointer arithmetic, pointer/integer casts, function pointers, heap allocation, raw memory functions, `goto`, unions, variadic functions, recursion, `setjmp`/`longjmp`, inline assembly, global writes, static locals), and how many functions already meet it. Built-in profiles: CLite (provisional), no pointers, and ready for a modular redesign; projects adjust them or define their own. A guide for manual work, not a certification. |
 | **Rejection report** | `weaver report --scope apps/sample_app`: evidence, pointers by class, each recipe's eligible and blocked candidates with the failing preconditions, the precondition that alone blocks the most, and contract status. |
 | **Change impact** | Snapshots of pointer facts (the working tree, or any git revision). `weaver impact` explains each pointer whose behavior changed since a snapshot, which edited line caused it, which recipe verdicts flipped, which pinned or transaction-implied contracts broke, and optionally whether builds and differential runs still agree. `weaver check` exits 1 on high risk, for CI. |
@@ -103,6 +104,11 @@ SVF and GCC each say the pointer may point to and, for a parameter, whether a ca
 target, each with its reason. When they disagree, the recipe takes the stricter answer
 (`flow.agreement: all`).
 
+The **Risk** tab shows where pointer risk concentrates: how many pointers are high, medium or low
+risk, which factors contribute, which modules or files carry the most, and a ranked list with
+every factor's evidence. Selecting a pointer opens its details, which list the same factors. The
+**Map** can switch from colouring pointers by behaviour to colouring them by risk.
+
 The **Simplify** tab measures progress toward a target: CLite, or simply simpler code ready for a
 modular redesign. Choose a profile to see how many functions already meet it and which constructs
 remain, by rule and by function. Open a function to jump to each construct's line. Profiles are
@@ -161,6 +167,7 @@ weaver coverage                               # code no configuration compiled
 weaver candidates --all                       # eligible candidates, and blocked ones with reasons
 weaver report --scope src/net -o REPORT.md    # inventory and rejection report for part of the tree
 weaver tasks                                  # declared threads of control, what was checked, who writes each global
+weaver risk --top 20                          # pointers ranked by risk factors, with the evidence for each
 weaver simplify --profile clite-provisional   # constructs standing between each function and the target
 weaver simplify --function parse_msg          # one function's constructs, line by line
 
@@ -309,6 +316,8 @@ The end-to-end tests capture real builds of the fixture with Clang and GCC. They
 - the task model on a pthreads program: private locals, shared globals, an address handed to a
   thread, an address published as an integer, incomplete declarations and a contradicted
   `single-threaded`;
+- the risk view: each factor from the facts behind it, scores and levels, ranking and totals, the
+  CLI and the web view;
 - the simplification checker: every construct found on its line in a purpose-built program,
   the built-in and project-defined profiles, and the web view;
 - change impact with contracts, git snapshots and revalidation;

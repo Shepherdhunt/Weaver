@@ -140,6 +140,15 @@ def classify_ref(ref: Node) -> Use:
     return Use("other", None, ref, p, {"parent": k})
 
 
+def _null_constant(n: Node | None) -> bool:
+    """A null pointer constant: 0, NULL as ((void *)0), through parentheses and casts."""
+    while n is not None and n.kind in ("ParenExpr", "ImplicitCastExpr", "CStyleCastExpr"):
+        if n.cast_kind == "NullToPointer":
+            return True
+        n = n.child(0)
+    return n is not None and n.kind == "IntegerLiteral" and n.raw.get("value") == "0"
+
+
 def _describe_rhs(n: Node | None) -> dict[str, Any]:
     while n is not None and (
         n.kind == "ParenExpr" or (n.kind == "ImplicitCastExpr" and n.cast_kind in ("NoOp", "BitCast", "LValueToRValue"))
@@ -253,7 +262,8 @@ def _classify_value(ref: Node, rv: Node) -> Use:
     if k == "BinaryOperator" and op in LOGICAL_OPS:
         return Use("null-test", None, ref, p)
     if k == "BinaryOperator" and op in COMPARE_OPS:
-        return Use("compare", None, ref, p, {"op": op})
+        # 'p != NULL' is a null test spelled as a comparison; record which it is
+        return Use("compare", None, ref, p, {"op": op, "null": _null_constant(p.child(1 - n.index))})
     if k == "BinaryOperator" and op in ARITH_OPS:
         return Use("arith", None, ref, p, {"op": op})
     if k == "BinaryOperator" and op == "=" and n.index == 1:
@@ -339,6 +349,8 @@ def describe_use_parts(k: str, access: str | None, d: dict[str, Any]) -> str:
             return f"copied into '{into.get('name')}'"
         return f"copied into {into.get('target', 'another object')}"
     if k == "compare":
+        if d.get("null"):
+            return f"compared with a null pointer ('{d.get('op')}')"
         return f"identity compared with '{d.get('op')}'"
     if k == "cast":
         return f"{'explicitly ' if d.get('explicit') else ''}converted ({d.get('cast_kind')}) to {d.get('to')}"
