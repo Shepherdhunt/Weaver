@@ -837,6 +837,43 @@ async function select(id, opts = {}) {
   else if (S.view === "source" && !opts.keepView) { S.sourceFile = S.detail.finding.file; S.focusLine = S.detail.finding.line; renderView(); }
 }
 
+const GCC_SPECIAL = {
+  NONLOCAL: "memory outside this function that GCC does not track further (globals, callers' objects)",
+  ESCAPED: "memory whose address escaped to code GCC cannot see",
+  ANYTHING: "GCC could not bound the target at all",
+  NULL: "a null pointer", STRING: "a string literal", HEAP: "heap memory",
+};
+
+// SVF and GCC side by side for one program: what the pointer may point to and, for a parameter,
+// whether a call may write that target, each with the backend's own reason.
+function pointsToTable(r, isParam) {
+  const cols = [["svf", "SVF", "whole-program analysis of the linked program"], ["gcc", "GCC", "the production compiler's own points-to"]];
+  const targetCell = (b) => {
+    if (!b) return h("td", { class: "d-sub", text: "not selected" });
+    if (!Array.isArray(b.targets)) return h("td", { class: "d-sub", text: b.note || b.status });
+    if (!b.targets.length) return h("td", { class: "d-sub", text: "nothing in the analysed program" });
+    return h("td", {}, h("div", { class: "targets" }, b.targets.map((o) => h("span", {
+      class: "tchip" + (o.kind === "gcc-special" ? " special" : " svf"),
+      title: o.kind === "gcc-special" ? (GCC_SPECIAL[o.name.replace(/\(.*/, "")] || o.name) : `${o.kind || "object"}${o.file ? " at " + o.file + ":" + o.line : ""}`,
+      text: o.name || `#${o.id}` }))), b.status === "incomplete" ? h("div", { class: "d-sub", text: "incomplete run" }) : null);
+  };
+  const writeCell = (b) => {
+    const w = b && b.writes;
+    if (!w) return h("td", { class: "d-sub", text: b ? (b.note || "—") : "not selected" });
+    const label = { no: "no write", yes: "may write", unknown: "unknown" }[w.answer] || w.answer;
+    return h("td", {}, h("span", { class: `verdict ${w.answer}`, text: label }), h("div", { class: "d-sub why", text: w.reason }));
+  };
+  const agree = r.agree === true ? h("span", { class: "verdict no", text: "backends agree" })
+    : r.agree === false ? h("span", { class: "verdict unknown", title: "The recipe takes the stricter answer (flow.agreement: all)", text: "backends disagree" }) : null;
+  return h("div", { class: "pt-wrap" },
+    h("div", { class: "pt-head" }, h("span", { class: "mono", text: r.program }), agree),
+    h("div", { class: "pt-scroll" }, h("table", { class: "pt" },
+      h("thead", {}, h("tr", {}, h("th", {}), cols.map(([, name, help]) => h("th", { title: help, text: name })))),
+      h("tbody", {},
+        h("tr", {}, h("th", { text: "Points to" }), cols.map(([k]) => targetCell(r[k]))),
+        isParam ? h("tr", {}, h("th", { text: "Can a call write it?" }), cols.map(([k]) => writeCell(r[k]))) : null))));
+}
+
 function aiOn() { return !!(S.state && S.state.ai && S.state.ai.enabled); }
 
 function icon(status) {
@@ -921,12 +958,9 @@ function renderDetail() {
     tsec.append(h("div", { class: "d-sub", text: "Syntactic hypotheses (initializers and assignments):" }),
       h("div", { class: "targets" }, ast.length ? ast.map((t) => h("span", { class: "tchip", text: t })) : h("span", { class: "d-sub", text: "none recorded" })));
   }
-  for (const s of d.svf_targets) {
-    tsec.append(h("div", { class: "d-sub", text: `SVF points-to (${s.profile}${s.complete ? "" : ", incomplete"}):` }),
-      h("div", { class: "targets" }, s.targets.length ? s.targets.map((o) => h("span", { class: "tchip svf", title: `${o.kind || "object"} ${o.file ? "at " + o.file + ":" + o.line : ""}`, text: o.name || `#${o.id}` }))
-        : h("span", { class: "d-sub", text: "points to nothing in the analysed program" })));
-  }
-  if (!d.svf_targets.length) tsec.append(h("div", { class: "d-sub", text: "No points-to evidence yet (run “Points-to”)." }));
+  const rows = d.points_to || [];
+  for (const r of rows) tsec.append(pointsToTable(r, f.kind === "parameter"));
+  if (!rows.length) tsec.append(h("div", { class: "d-sub", text: "No points-to evidence yet (run “Points-to”)." }));
   box.append(tsec);
 
   if (d.callers && d.callers.length) {

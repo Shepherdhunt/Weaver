@@ -30,6 +30,7 @@ class Cache:
         self.key: tuple[str, str] | None = None
         self.verdicts: dict[str, Any] = {}
         self.inv: dict[str, Any] | None = None
+        self.ctx: Any = None  # the RecipeContext of the cached evaluation (flow evidence loaded once)
         # Path prefixes the views show (large projects: a subsystem at a time).  Recipes still see the
         # whole program; only findings under these prefixes are evaluated and listed.
         self.scope = scope or []
@@ -44,6 +45,7 @@ class Cache:
             from weaver.recipes import RecipeContext, recipes_for_finding
 
             ctx = RecipeContext(project, inv)
+            self.ctx = ctx
             verdicts: dict[str, Any] = {}
             if self.scope:
                 inv = {
@@ -186,7 +188,6 @@ def pointer_list(project: Project, cache: Cache) -> dict[str, Any]:
 
 def pointer_detail(project: Project, fid: str, cache: Cache) -> dict[str, Any]:
     from weaver.analysis.inventory import find_finding
-    from weaver.flow.evidence import load_flow
     from weaver.llm.slice import source_lines
 
     inv, verdicts = cache.get(project)
@@ -203,14 +204,12 @@ def pointer_detail(project: Project, fid: str, cache: Cache) -> dict[str, Any]:
                 "source": lines[ln - 1].strip() if 0 < ln <= len(lines) else None,
             }
         )
-    svf_targets = []
-    for occ_profile in sorted({o["profile"] for o in f.get("occurrences", [])}):
-        fe = load_flow(project, occ_profile, inv)
-        if fe is None:
-            continue
-        objs = _svf_targets_for(fe, f)
-        if objs is not None:
-            svf_targets.append({"profile": occ_profile, "complete": fe.complete, "targets": objs})
+    points_to = _points_to(project, inv, f, cache)
+    svf_targets = [
+        {"profile": r["program"], "complete": r["svf"]["status"] == "current", "targets": r["svf"]["targets"]}
+        for r in points_to
+        if r["svf"] and r["svf"].get("targets") is not None
+    ]
     lo = max(1, (f.get("line") or 1) - 3)
     fsum = inv.get("functions", {}).get(f"{rel}::{f.get('function')}")
     hi = (fsum or {}).get("end_line") or (f.get("line") or 1) + 12
@@ -230,6 +229,7 @@ def pointer_detail(project: Project, fid: str, cache: Cache) -> dict[str, Any]:
         "uses": uses,
         "excerpt": {"file": rel, "start": lo, "lines": source_lines(project.root, rel, lo, min(hi, lo + 80))},
         "svf_targets": svf_targets,
+        "points_to": points_to,
         "recipes": verdicts.get(f["id"], {}),
         "contracts": contracts,
         "callers": callers,
@@ -269,6 +269,86 @@ def _call_arguments(project: Project, inv: dict[str, Any], f: dict[str, Any]) ->
             )
     out.sort(key=lambda x: (x["file"] or "", x["line"] or 0))
     return out
+
+
+def _combine_gcc(answers: list[tuple[str, str]]) -> dict[str, str]:
+    """One program's GCC answer from its images' answers: a write in any image wins."""
+    for want in ("yes", "unknown"):
+        hit = next((r for a, r in answers if a == want), None)
+        if hit is not None:
+            return {"answer": want, "reason": hit}
+    if answers:
+        return {"answer": "no", "reason": answers[0][1]}
+    return {"answer": "unknown", "reason": "the function is in no image GCC analysed"}
+
+
+def _points_to(project: Project, inv: dict[str, Any], f: dict[str, Any], cache: Cache) -> list[dict[str, Any]]:
+    """SVF and GCC evidence for one pointer, side by side, per program that links its code.
+
+    For each backend: what the pointer may point to, and (for parameters) whether a call may
+    write that target, with the backend's own reason.  ``agree`` compares the two answers.
+    """
+    from weaver.flow.evidence import load_flow
+    from weaver.flow.gcc_pta import SPECIAL, gcc_profile
+    from weaver.flow.program import may_modify
+    from weaver.recipes import RecipeContext
+
+    ctx = cache.ctx or RecipeContext(project, inv)
+    units = sorted({o["unit"] for o in f.get("occurrences", []) if o.get("unit")})
+    flows = ctx.flows_for_units(units)
+    if not flows:  # linked into no known program: each profile's only program
+        flows = {p: load_flow(project, p, inv) for p in sorted({o["profile"] for o in f.get("occurrences", [])})}
+    param = f.get("kind") == "parameter" and bool(f.get("function"))
+    fkey = f"{f.get('file')}::{f.get('function')}"
+    idx = int(f.get("param_index") or 0)
+    rows: list[dict[str, Any]] = []
+    for key, fe in sorted(flows.items()):
+        profile, _, prog = key.partition("/")
+        row: dict[str, Any] = {"program": key, "svf": None, "gcc": None, "agree": None}
+        if project.flow.uses("svf"):
+            if fe is None:
+                row["svf"] = {"status": "missing", "note": "no current SVF run for this program (run Points-to)"}
+            else:
+                objs = _svf_targets_for(fe, f)
+                row["svf"] = {"status": "current" if fe.complete else "incomplete", "targets": objs}
+                if objs is None:
+                    row["svf"]["note"] = "SVF's results do not map this declaration"
+                if param and fkey in ctx.program.funcs:
+                    m = may_modify(ctx.program, fkey, idx, {key: fe}, None)
+                    why = next((r["detail"] for r in m.reasons if r["status"] == m.status), None)
+                    row["svf"]["writes"] = {
+                        "answer": m.status,
+                        "reason": why or "no write in the call's closure reaches these targets",
+                    }
+        if project.flow.uses("gcc"):
+            prof = next((p for p in project.profiles if p.id == profile), None)
+            sols = ctx.gcc(profile, prog) if prog else {}
+            if prof is None or not gcc_profile(project, prof):
+                row["gcc"] = {"status": "not-applicable", "note": "the production compiler is not GCC"}
+            elif not sols:
+                row["gcc"] = {"status": "missing", "note": "no current GCC points-to run for this program"}
+            elif not param:
+                row["gcc"] = {"status": "current", "targets": None, "note": "GCC's solution covers parameters only"}
+            else:
+                names: set[str] = set()
+                answers = []
+                for g in sols.values():
+                    rec = g.functions.get(f["function"])
+                    if rec is None:
+                        continue
+                    names |= set(rec["args"].get(str(idx), []))
+                    answers.append(g.may_modify(f["function"], idx))
+                row["gcc"] = {
+                    "status": "current",
+                    "targets": [{"name": n, "kind": "gcc-special" if n in SPECIAL else None} for n in sorted(names)],
+                    "writes": _combine_gcc(answers),
+                }
+        a = (row["svf"] or {}).get("writes", {}).get("answer")
+        b = (row["gcc"] or {}).get("writes", {}).get("answer")
+        if a and b:
+            row["agree"] = a == b
+        rows.append(row)
+    return rows
 
 
 def _svf_targets_for(fe: Any, f: dict[str, Any]) -> list[dict[str, Any]] | None:

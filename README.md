@@ -44,7 +44,7 @@ can be accepted. The optional LLM explains and recommends; it never edits or val
 | **Rejection report** | `weaver report --scope apps/sample_app`: evidence, pointers by class, each recipe's eligible and blocked candidates with the failing preconditions, the precondition that alone blocks the most, and contract status. |
 | **Change impact** | Snapshots of pointer facts (the working tree, or any git revision). `weaver impact` explains each pointer whose behavior changed since a snapshot, which edited line caused it, which recipe verdicts flipped, which pinned or transaction-implied contracts broke, and optionally whether builds and differential runs still agree. `weaver check` exits 1 on high risk, for CI. |
 | **Web interface** | `weaver serve`: load or set up a project, compile, then explore a map of every pointer colored by what it does to its target. Graphs show points-to and call relationships, and a source view has inline marks. Refactors can be proposed, validated and accepted, contracts pinned, and change impact compared. `--scope` shows one subsystem of a large project. `weaver export-ui` records the interface as one read-only HTML page for sharing. |
-| LLM (tracker §10) | A focused evidence slice for one finding and the planner instruction taken verbatim from the plans. `weaver explain` runs an optional Claude tool loop whose tools can only read evidence. |
+| **AI explanations** (tracker §10) | Off by default; switched on per project. Bring your own key: Claude through Anthropic's SDK, or any OpenAI-style Chat Completions server, hosted or local. One explanation guide (Weaver's vocabulary, evidence rules, eight fixed answer sections) is given to every provider, with the same focused evidence slice and read-only evidence tools; answers are checked against it. `weaver ai`, `weaver explain`. |
 
 Not yet, following the plans' roadmap: the output-parameter, buffer/range, typed-ID and callback
 recipes; field-sensitive and lock-aware ownership; CBMC equivalence harnesses; and vendor
@@ -54,16 +54,17 @@ adapters (Diab, Green Hills). See
 ## Install
 
 ```sh
-pip install -e .            # requires Python ≥ 3.10 and PyYAML
-pip install -e '.[flow]'    # optional: SVF points-to analysis (pysvf bundles LLVM and wpa; AGPL, see below)
-pip install -e '.[llm]'     # optional: Claude-backed `weaver explain`
+pip install -e '.[flow]'    # Weaver with SVF points-to analysis (pysvf bundles LLVM and wpa; AGPL, see below)
+pip install -e '.[llm]'     # optional: Claude for AI explanations (other providers need nothing extra)
 pip install -e '.[test]'    # pytest
 ```
 
-A production compiler (Clang or GCC-compatible) must be installed. For non-Clang profiles you also
-need a Clang to act as the secondary frontend. GCC's own points-to analysis needs GCC with LTO
-support (`gcc-ar` or `ar` with the LTO plugin) and binutils (`nm`). The web interface uses only the
-standard library.
+Requires Python ≥ 3.10. Points-to evidence comes from two analyses that Weaver shows side by side:
+SVF (installed by `[flow]`) and GCC's own interprocedural points-to, which needs GCC with LTO support
+(`gcc-ar` or `ar` with the LTO plugin) and binutils (`nm`). `pip install -e .` alone works too, with
+GCC's analysis only. A production compiler (Clang or GCC-compatible) must be installed. For
+non-Clang profiles you also need a Clang to act as the secondary frontend. The web interface uses
+only the standard library.
 
 ## Web interface
 
@@ -95,6 +96,22 @@ weaver export-ui -o weaver.html                 # a read-only copy of the interf
    and can be reverted.
 5. **Guard**: pin what must stay true of a pointer ("read-only", "doesn't escape"…). Save a
    baseline, and after anyone changes the code, **Changes → Compare** explains what moved.
+
+The details panel shows the points-to evidence of both analyses side by side, per program: what
+SVF and GCC each say the pointer may point to and, for a parameter, whether a call may write that
+target, each with its reason. When they disagree, the recipe takes the stricter answer
+(`flow.agreement: all`).
+
+**AI explanations** are optional and off by default. When a project turns them on (Settings, or
+`weaver ai enable`), each pointer gets an **Explain with AI** button. The model receives that
+pointer's evidence and nearby source, may call Weaver's read-only evidence tools, and never edits
+anything. Bring your own key: Claude (`provider: anthropic`), or any server that speaks the
+OpenAI-style Chat Completions API, hosted or local (`provider: openai-compatible`, for example Ollama
+at `http://localhost:11434/v1`, which keeps the code on your machine). Keys come from the provider's
+environment variable or are stored for your user account outside the project (`weaver ai key`, or
+Settings); they never go into `weaver.yaml`. Every provider receives the same explanation guide
+(`weaver ai guide` prints it) and must answer in the same eight sections, so explanations read the
+same whichever model gives them. Answers that skip a section are flagged.
 
 The top bar shows the validation strength. **validation: compile only** means no test or
 differential run is configured, so an accepted change has been compiled and re-checked but never
@@ -128,7 +145,8 @@ weaver report --scope src/net -o REPORT.md    # inventory and rejection report f
 weaver tasks                                  # declared threads of control, what was checked, who writes each global
 
 weaver show P-1a2b3c4d5e                      # one finding: uses, targets, precondition evaluation
-weaver explain P-1a2b3c4d5e --dry-run         # the LLM request (or run it with credentials)
+weaver ai enable --provider openai-compatible --base-url http://localhost:11434/v1 --model llama3.1
+weaver explain P-1a2b3c4d5e --dry-run         # the request every provider would get (nothing is sent)
 weaver propose P-1a2b3c4d5e                   # open a transaction and print its candidate card and patch
 weaver validate T-0bb5fce6                    # isolated compile, re-check, build, tests, differential run
 weaver accept T-0bb5fce6                      # apply under the acceptance policy (or: skip)
@@ -274,7 +292,8 @@ The end-to-end tests capture real builds of the fixture with Clang and GCC. They
 - change impact with contracts, git snapshots and revalidation;
 - the web server's request guards, its views, scoped views, the read-only export, and the
   propose/validate/accept and setup/capture workflows through its jobs;
-- the LLM tool loop against a fake client.
+- AI explanations: the Claude tool loop against a fake client, the OpenAI-compatible loop against a
+  fake local server, the shared guide and its section check, the on/off switch and private key storage.
 
 ## License
 

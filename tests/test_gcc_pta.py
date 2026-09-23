@@ -179,6 +179,20 @@ def test_backends_cross_check(tmp_path):
     # e_release writes **pp: SVF says yes, GCC says no; a yes from any backend wins
     assert v[("e_release", "pp")][1].status == "violated"
 
+    # the interface shows both backends side by side, per program
+    from weaver.web.api import Cache, pointer_detail, pointer_list
+
+    proj, cache = load_project(root), Cache()
+    ids = {(p["function"], p["name"]): p["id"] for p in pointer_list(proj, cache)["pointers"]}
+    (row,) = pointer_detail(proj, ids[("p_sum2", "a")], cache)["points_to"]
+    assert row["program"] == "gcc/demo" and row["agree"] is True
+    assert [o["name"] for o in row["svf"]["targets"]] == [o["name"] for o in row["gcc"]["targets"]] == ["la"]
+    assert row["svf"]["writes"]["answer"] == row["gcc"]["writes"]["answer"] == "no"
+    (row,) = pointer_detail(proj, ids[("e_release", "pp")], cache)["points_to"]
+    assert (row["svf"]["writes"]["answer"], row["gcc"]["writes"]["answer"], row["agree"]) == ("yes", "no", False)
+    (row,) = pointer_detail(proj, ids[("la_struct", "pp")], cache)["points_to"]
+    assert row["svf"]["targets"][0]["name"] == "pt" and row["gcc"]["targets"] is None  # GCC: parameters only
+
     # GCC cannot decide p_scale (its argument may point to ANYTHING) while SVF says no write
     import json
 

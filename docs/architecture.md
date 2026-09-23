@@ -125,7 +125,7 @@ Task ownership and scale make the interface recipes usable on multi-task program
 | `rewrite.py` | tracker §§6, 9 | Deterministic byte-range edits bound to file hashes, overlap and stale checks, diffs, offset maps. |
 | `validate.py` | tracker §7 | Isolated workspaces, path remapping, compile, mechanical re-check, builds, tests, differential runs, and judgement under the acceptance policy. |
 | `ledger.py`, `card.py` | tracker §6 | Transaction states, event log, checkpoints, three-way revert, and candidate cards. |
-| `llm/` | tracker §10, artifact §§10-11 | Evidence slice, planner instruction, and an optional Claude tool loop (read-only tools, transcripts saved). |
+| `llm/` | tracker §10, artifact §§10-11 | AI explanations, off unless enabled: evidence slice, the shared explanation guide (`data/explain_guide.md`) and its section check, read-only evidence tools, Claude through its SDK and OpenAI-style Chat Completions servers through a standard-library adapter, per-user key storage, transcripts saved. |
 | `link.py` | artifact §§3, 7 | Link model: images, archive members from a traced link replay, libraries and their undefined symbols, dynamic exports and imports, programs, and who outside the analysed code can call a function. |
 | `flow/gcc_pta.py` | artifact §§7, 10 | GCC-native flow evidence: LTO objects with `-fipa-pta`, image link replays, the `pta2` dump parser, and `may_modify` over GCC's points-to and clobber sets. |
 | `data/models/posix.yaml`, `data/models/cfs.yaml` | artifact §7 | Reviewed effect-model packs: POSIX/glibc (always loaded) and `builtin:cfs` (cFE/OSAL APIs as boundary models, framework-owned state, retained arguments). |
@@ -310,6 +310,21 @@ Lexed files and ASTs live in bounded LRU caches. Locations and tokens are slotte
 location dictionaries are dropped once resolved, and documentation-comment nodes are skipped while
 their locations still advance the resolver's state. Peak memory is now under 1 GB for the same
 run.
+
+**AI explanations are the same whichever model gives them.** Customers bring their own provider and
+key, so answers could drift in form and in what they claim. Every provider receives the same
+system prompt, the explanation guide: what Weaver is, its vocabulary (access classes, precondition
+statuses, evidence statuses, points-to backends), rules (only evidence, `file:line` for every fact,
+unknown stays unknown, no invented results, no hidden pointers), and eight fixed answer sections.
+They also get the same evidence slice and the same read-only tools. An answer missing a section is
+flagged, and the transcript records the provider, model and guide version. The feature is off
+unless the project enables it. Keys stay in the environment or in a per-user file outside the
+project, and plain HTTP is allowed only to a server on the same machine.
+
+**SVF and GCC are shown side by side.** Recipes already combine both backends conservatively; the
+details panel now shows each one's view, per program that links the code: the targets, and for
+parameters whether a call may write them, each with the backend's own reason, plus whether they
+agree. Before this, the panel read SVF evidence only for single-program profiles.
 
 **A read-only snapshot shares the interface without a server.** `weaver export-ui` asks the same
 routes the browser asks, for every view that changes nothing, and embeds the answers next to the
