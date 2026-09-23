@@ -158,6 +158,22 @@ def cmd_flow(args: argparse.Namespace) -> int:
 
     proj = _project(args)
     rc = 0
+    want = {"all": ["svf", "gcc"], "svf": ["svf"], "gcc": ["gcc"]}[args.backend] if args.backend else proj.flow.backends
+    if "gcc" in want:
+        from weaver.flow.gcc_pta import run_gcc_pta
+
+        for prof in proj.select_profiles(args.profile):
+            g = run_gcc_pta(proj, prof, log=None if args.json else print)
+            if args.json:
+                _print_json(g)
+                continue
+            print(f"profile {prof.id}: GCC points-to {g['status']}" + (f" ({g['reason']})" if g.get("reason") else ""))
+            if g.get("deviations"):
+                print(f"  analysis deviations from production flags: {' '.join(g['deviations'])}")
+            if g["status"] not in ("complete", "unavailable"):
+                rc |= 1
+    if "svf" not in want:
+        return rc
     for prof in proj.select_profiles(args.profile):
         res = run_flow(proj, prof, force=args.force)
         if args.json:
@@ -667,8 +683,13 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--no-layout", action="store_true", help="skip ABI/layout probes")
     sp.add_argument("--json", action="store_true")
 
-    sp = add("flow", cmd_flow, "run SVF points-to analysis as a separate job and record flow evidence")
+    sp = add("flow", cmd_flow, "run points-to analysis (SVF and/or the production GCC) and record flow evidence")
     profiles(sp)
+    sp.add_argument(
+        "--backend",
+        choices=["svf", "gcc", "all"],
+        help="which analysis to run (default: flow.backend in weaver.yaml; 'gcc' needs a GCC profile)",
+    )
     sp.add_argument("--force", action="store_true", help="rebuild bitcode even if cached")
     sp.add_argument("--json", action="store_true")
 

@@ -144,10 +144,16 @@ function renderTop() {
   info.append(h("span", { class: "name", text: p.name }), h("span", { class: "path", title: p.root, text: p.root }));
   for (const prof of p.profiles) {
     const fl = (st.flow || {})[prof.id] || {};
-    const flowTxt = fl.complete ? "points-to ✓" : fl.run ? `points-to ${fl.run.status}` : "no points-to";
-    info.append(h("span", { class: "pill", title: `compile database: ${prof.compile_commands}` },
+    const g = fl.gcc || null;
+    const parts = [];
+    if (fl.run && fl.run.status !== "unavailable") parts.push(fl.complete ? "SVF ✓" : `SVF ${fl.run.status}`);
+    if (g && g.status !== "unavailable") parts.push(g.complete ? "GCC ✓" : `GCC ${g.current}/${g.images}`);
+    const anyOk = fl.complete || (g && g.complete);
+    const flowTxt = parts.length ? "points-to " + parts.join(" ") : "no points-to";
+    info.append(h("span", { class: "pill", title: `compile database: ${prof.compile_commands}\npoints-to backends: ${(st.flow_backends || []).join(", ") || "none"}` +
+        (g && g.reason ? `\nGCC: ${g.reason}` : "") + (fl.run && fl.run.reason ? `\nSVF: ${fl.run.reason}` : "") },
       h("span", { class: "dot", style: { color: prof.compile_commands_exist ? "var(--ok)" : "var(--faint)" } }),
-      prof.id, h("span", { style: { color: fl.complete ? "var(--ok)" : "var(--faint)" }, text: " · " + flowTxt })));
+      prof.id, h("span", { style: { color: anyOk ? "var(--ok)" : "var(--faint)" }, text: " · " + flowTxt })));
   }
   if (st.stale_files && st.stale_files.length) {
     info.append(h("span", { class: "pill warn", title: st.stale_files.join("\n") },
@@ -166,8 +172,9 @@ function renderTop() {
     h("button", { class: "btn primary", disabled: busy, onclick: () => compile(),
       title: "Rebuild through capture shims (if configured), collect compiler evidence, check fidelity, " +
              "build the inventory and run points-to analysis" }, "▶ Compile & analyse"),
-    h("button", { class: "btn", disabled: busy || !st.inventory || !st.svf_available, onclick: () => runFlow(),
-      title: st.svf_available ? "Run SVF points-to analysis as a separate job" : "SVF is not installed (pip install weaver[flow])" },
+    h("button", { class: "btn", disabled: busy || !st.inventory || !(st.flow_backends || []).length, onclick: () => runFlow(),
+      title: "Run points-to analysis as a separate job: " + ((st.flow_backends || []).join(" and ") || "no backend selected") +
+        (st.svf_available || !(st.flow_backends || []).includes("svf") ? "" : " (SVF is not installed: pip install weaver[flow])") },
       "Points-to"),
     h("button", { class: "btn ghost", onclick: () => openSettings(), title: "Validation commands and acceptance policy" }, "Settings"),
     h("button", { class: "btn ghost", onclick: () => { S.state.project = null; renderWelcome(true); },

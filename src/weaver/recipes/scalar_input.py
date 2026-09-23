@@ -294,6 +294,8 @@ class ScalarInputRecipe(Recipe):
             from weaver.flow.evidence import load_flow
 
             flows = {p: load_flow(ctx.project, p, inv) for p in sorted({u["profile"] for u in defining_units})}
+        if not ctx.project.flow.uses("svf"):
+            flows = {k: None for k in flows}
         arg_designators: list[dict[str, Any]] | None = []
         for _, c in callers:
             a = c["args"][idx] if idx < len(c["args"]) else None
@@ -303,26 +305,73 @@ class ScalarInputRecipe(Recipe):
             arg_designators.append(a["addr_of"])
         mod = may_modify(prog, fkey, idx, flows, arg_designators)
         mod_desc = "no write found"
+        svf_present = any(fe is not None for fe in flows.values())
+        gcc = _gcc_verdicts(ctx, fname, idx, list(fsum.get("units", [])))
+        gcc_yes = [g for g in gcc if g["status"] == "yes"]
+        gcc_status = (
+            None if not gcc else "yes" if gcc_yes else "unknown" if any(g["status"] == "unknown" for g in gcc) else "no"
+        )
+        # Backends that answered: SVF (through may_modify with flow evidence) and GCC.  Without SVF
+        # evidence, may_modify's own answer (models and call-site designators) stands in for it.
+        verdicts = {"svf" if svf_present else "models": mod.status}
+        if gcc_status is not None:
+            verdicts["gcc"] = gcc_status
+            if not svf_present and mod.status == "unknown":
+                del verdicts["models"]  # GCC's whole-image solution replaces designator-only reasoning
+        agree_any = ctx.project.flow.agreement == "any"
+        combined = (
+            "yes"
+            if "yes" in verdicts.values()
+            else "no"
+            if all(v == "no" for v in verdicts.values()) or (agree_any and "no" in verdicts.values())
+            else "unknown"
+        )
         if mod.status == "yes":
             for r in mod.reasons:
                 if r["status"] == "yes":
                     P["mod"].fail(VIOLATED, f"{r['function']}(){self._at(r)}: {r['detail']}")
-        elif mod.status == "unknown":
-            for r in mod.reasons:
+        for g in gcc_yes:
+            P["mod"].fail(VIOLATED, f"{g['text']} [{g['program']}]")
+        if combined == "unknown":
+            if mod.status == "unknown" and ("models" in verdicts or "svf" in verdicts):
+                for r in mod.reasons:
+                    P["mod"].fail(
+                        UNRESOLVED,
+                        f"{r['function']}(){self._at(r)}: {r['detail']}",
+                        "run 'weaver flow' (SVF or GCC points-to), or add a reviewed effect model in weaver.yaml",
+                    )
+            for g in gcc:
+                if g["status"] == "unknown":
+                    P["mod"].fail(UNRESOLVED, f"{g['text']} [{g['program']}]")
+            if len(verdicts) > 1 and "no" in verdicts.values():
                 P["mod"].fail(
                     UNRESOLVED,
-                    f"{r['function']}(){self._at(r)}: {r['detail']}",
-                    "run 'weaver flow' (SVF), or add a reviewed effect model in weaver.yaml",
+                    "points-to backends disagree: "
+                    + ", ".join(f"{k} says {'no write' if v == 'no' else v}" for k, v in verdicts.items())
+                    + "; flow.agreement is 'all'",
+                    "review the unknown answer above; 'flow: {agreement: any}' accepts one backend's 'no write'",
                 )
-        else:
+        elif combined == "no":
             src = "SVF points-to evidence" if any(flows.values()) else "call-site designators"
             tnames = sorted({t.get("name") or "?" for t in mod.targets}) or sorted(
                 {d.get("name") for d in (arg_designators or [])}
             )
-            mod_desc = f"checked {sum(mod.checked.values())} write(s) in {len(mod.closure)} function(s) using {src}"
-            pos("mod", f"{mod_desc}; possible targets: {', '.join(str(t) for t in tnames) or 'none'}")
-            for a in mod.assumptions:
-                pos("mod", f"assumption: {a}")
+            if mod.status == "no":
+                mod_desc = f"checked {sum(mod.checked.values())} write(s) in {len(mod.closure)} function(s) using {src}"
+                pos("mod", f"{mod_desc}; possible targets: {', '.join(str(t) for t in tnames) or 'none'}")
+                for a in mod.assumptions:
+                    pos("mod", f"assumption: {a}")
+            for g in gcc:
+                if g["status"] == "no":
+                    mod_desc = "GCC's whole-image points-to solution shows no write" if mod.status != "no" else mod_desc
+                    pos("mod", f"{g['text']} [{g['program']}]")
+            if len(set(verdicts.values())) > 1:
+                pos(
+                    "mod",
+                    "backends disagree ("
+                    + ", ".join(f"{k}: {v}" for k, v in verdicts.items())
+                    + "); established because flow.agreement is 'any'",
+                )
         for p, fe in flows.items():
             if fe is not None:
                 pos(
@@ -660,3 +709,19 @@ class ScalarInputRecipe(Recipe):
                     if t is None or t.kind == "pointer":
                         problems.append(f"line {n.begin.file_loc.line}: call still passes a pointer")
         return problems if relevant else None
+
+
+def _gcc_verdicts(ctx: RecipeContext, fname: str, idx: int, units: list[str]) -> list[dict[str, Any]]:
+    """GCC's may-modify answer for each current image solution that contains the function's units."""
+    out: list[dict[str, Any]] = []
+    if not ctx.project.flow.uses("gcc"):
+        return out
+    for key in ctx.programs_for_units(units):
+        profile, _, prog = key.partition("/")
+        images = {i for u in units for i in ctx.link(profile).unit_images.get(u, [])}
+        for g in ctx.gcc(profile, prog).values():
+            if g.image not in images:
+                continue
+            status, text = g.may_modify(fname, idx)
+            out.append({"program": key, "image": g.image, "status": status, "text": text})
+    return out

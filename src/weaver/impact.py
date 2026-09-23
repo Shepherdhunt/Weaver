@@ -662,7 +662,7 @@ def impact(project: Project, since: str, revalidate: bool = False, log: Any = No
 
 def revalidate_against(project: Project, tree: Path, log: Any = None) -> list[dict[str, Any]]:
     """Run each profile's build, tests and comparisons on the snapshot tree and on the current tree."""
-    from weaver.validate import _compare_tests, _run_spec, test_outcomes
+    from weaver.validate import _compare_tests, _run_spec, parse_test_outcomes
 
     work = Store(project.state_dir).root / "impact" / "work"
     base_ws, cur_ws = work / "baseline", work / "current"
@@ -693,8 +693,8 @@ def revalidate_against(project: Project, tree: Path, log: Any = None) -> list[di
                 continue
             ra = _run_spec(t, base_ws, project) if ok["baseline"] else None
             rb = _run_spec(t, cur_ws, project)
-            per_a = test_outcomes(ra.stdout_text(None)) if ra is not None else {}
-            per_b = test_outcomes(rb.stdout_text(None))
+            per_a = parse_test_outcomes(ra.stdout_text(None)) if ra is not None else {}
+            per_b = parse_test_outcomes(rb.stdout_text(None))
             rec: dict[str, Any] = {"kind": "testing", "name": f"{prof.id}:{t.name}"}
             if per_a and per_b:
                 outcome, detail, extra = _compare_tests(per_a, per_b)

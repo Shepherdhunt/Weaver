@@ -108,5 +108,18 @@ def refresh(
             log(f"[{prof.id}] flow: {fr['status']}" + (f" ({fr['reason']})" if fr.get("reason") else ""))
             summary.setdefault("flow", {})[prof.id] = fr["status"]
     else:
-        log("flow: skipped (SVF unavailable or disabled)")
+        log(
+            "flow: SVF skipped ("
+            + ("not selected in flow.backend" if not project.flow.uses("svf") else "unavailable or disabled")
+            + ")"
+        )
+    if flow is not False and project.flow.uses("gcc"):
+        from weaver.flow.gcc_pta import gcc_profile, run_gcc_pta
+
+        for prof in project.profiles:
+            if not gcc_profile(project, prof):
+                continue
+            gr = run_gcc_pta(project, prof, jobs=jobs)
+            log(f"[{prof.id}] gcc points-to: {gr['status']}" + (f" ({gr['reason']})" if gr.get("reason") else ""))
+            summary.setdefault("gcc_pta", {})[prof.id] = gr["status"]
     return summary

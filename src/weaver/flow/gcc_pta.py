@@ -62,6 +62,7 @@ SPECIAL = {"NULL", "STRING", "ESCAPED", "NONLOCAL", "ANYTHING", "INTEGER", "READ
 _SET = re.compile(r"^(?P<name>\S+) = \{ ?(?P<body>[^}]*?) ?\}(?P<rest>.*)$")
 _SYM = re.compile(r"^(?P<name>\S+)/\d+ \((?P<asm>[^)]*)\)")
 _CLONE = re.compile(r"\.(lto_priv|constprop|isra|part|cold)\.\d+$")
+_RENUMBERING = re.compile(r"\.(constprop|isra|part)\.\d+")
 
 
 def gcc_profile(project: Project, profile: Profile) -> bool:
@@ -106,6 +107,12 @@ def run_gcc_pta(project: Project, profile: Profile, jobs: int | None = None, log
         write_json(out / "run.json", rec)
         return rec
     cmds = {c.unit_id(profile.id): c for c in load_compdb(profile.compile_commands)}
+    inv_path = store.inventory_path
+    inv_units = (
+        {u["unit_id"]: u["file_sha256"] for u in read_json(inv_path)["units"] if u["profile"] == profile.id}
+        if inv_path.exists()
+        else {}
+    )
 
     # 1. LTO objects for every unit in a program ------------------------------------------
     wanted = sorted({u for p in lm.programs for u in p.units})
@@ -140,6 +147,12 @@ def run_gcc_pta(project: Project, profile: Profile, jobs: int | None = None, log
             img = lm.images[name]
             t0 = time.time()
             res = _replay(project, lm, prog, img, objects, out / "programs" / _safe(prog.name) / _safe(name))
+            res["inputs"] = [{"unit": u, "file_sha256": inv_units.get(u)} for u in sorted(img.units)]
+            if (out / "programs" / _safe(prog.name) / _safe(name) / "pta.json").exists():
+                pta = out / "programs" / _safe(prog.name) / _safe(name) / "pta.json"
+                data = read_json(pta)
+                data["inputs"] = res["inputs"]
+                write_json(pta, data)
             res["duration_s"] = round(time.time() - t0, 2)
             prec["images"][name] = {k: res.get(k) for k in ("status", "reason", "functions", "duration_s", "dump")}
             if log:
@@ -289,17 +302,36 @@ def parse_pta_dump(text: str) -> dict[str, Any]:
         elif ln.strip() == "" or ln.startswith(";;"):
             if sets and ln.startswith(";;"):
                 in_sets = False
-    functions: dict[str, dict[str, Any]] = {}
+    # Per symbol first, then merged by source name.  Two symbols share a source name when LTO renamed
+    # clashing statics (".lto_priv.N") or when GCC cloned a function; their sets are united, which can
+    # only add apparent overlaps.  A clone whose parameters may be renumbered (".isra", ".constprop",
+    # ".part") marks the record, and queries about its parameters return unknown.
+    raw: dict[str, dict[str, Any]] = {}
     for name, body in sets.items():
         m = re.fullmatch(r"(?P<fn>.+)\.(?P<part>arg(?P<n>\d+)|clobber|use|result)", name)
         if not m:
             continue
-        fn = _CLONE.sub("", m.group("fn"))
-        rec = functions.setdefault(fn, {"args": {}, "clobber": None, "use": None})
+        rec = raw.setdefault(m.group("fn"), {"args": {}, "clobber": None, "use": None})
         if m.group("n") is not None:
             rec["args"][m.group("n")] = body  # string keys: the record is stored as JSON
         elif m.group("part") in ("clobber", "use"):
             rec[m.group("part")] = body
+    functions: dict[str, dict[str, Any]] = {}
+    for sym, rec in raw.items():
+        fn = _CLONE.sub("", sym)
+        while _CLONE.search(fn):
+            fn = _CLONE.sub("", fn)
+        cur = functions.get(fn)
+        if cur is None:
+            functions[fn] = {**rec, "symbols": [sym], "renumbered": bool(_RENUMBERING.search(sym))}
+            continue
+        cur["symbols"].append(sym)
+        cur["renumbered"] = cur["renumbered"] or bool(_RENUMBERING.search(sym))
+        for n in set(cur["args"]) | set(rec["args"]):
+            cur["args"][n] = sorted(set(cur["args"].get(n, [])) | set(rec["args"].get(n, [])))
+        for k in ("clobber", "use"):
+            # a missing set on either symbol leaves the merged set unknown
+            cur[k] = sorted(set(cur[k]) | set(rec[k])) if cur[k] is not None and rec[k] is not None else None
     variables = sorted(n for n, s in symtab.items() if s.get("kind") == "variable")
     return {
         "functions": functions,
@@ -328,6 +360,8 @@ class GccPta:
         f = self.functions.get(function)
         if f is None:
             return "unknown", f"GCC ({self.image}): no points-to record for {function}()"
+        if f.get("renumbered"):
+            return "unknown", f"GCC ({self.image}): {function}() was cloned with changed parameters ({f['symbols']})"
         arg = f["args"].get(str(index))
         clob = f.get("clobber")
         if arg is None or clob is None:
@@ -370,8 +404,19 @@ class GccPta:
         return s.get("visibility") if s else None
 
 
-def load_gcc_pta(project: Project, profile_id: str, program: str | None = None) -> dict[str, GccPta]:
-    """``program/image`` -> GCC's solution, for every image with a complete replay."""
+def load_gcc_pta(
+    project: Project, profile_id: str, program: str | None = None, inventory: dict[str, Any] | None = None
+) -> dict[str, GccPta]:
+    """``program/image`` -> GCC's solution, for every image with a complete, current replay.
+
+    With ``inventory``, an image whose recorded unit sources differ from the
+    inventory's (the code changed since the replay) is left out as stale.
+    """
+    current = (
+        {u["unit_id"]: u["file_sha256"] for u in inventory["units"] if u["profile"] == profile_id}
+        if inventory is not None
+        else None
+    )
     d = Store(project.state_dir).root / "flow" / profile_id / "gcc" / "programs"
     out: dict[str, GccPta] = {}
     if not d.is_dir():
@@ -383,6 +428,11 @@ def load_gcc_pta(project: Project, profile_id: str, program: str | None = None) 
             p = idir / "pta.json"
             if p.exists():
                 data = read_json(p)
-                if (data.get("result") or {}).get("status") == "complete":
-                    out[f"{data.get('program')}/{data.get('image')}"] = GccPta(data)
+                if (data.get("result") or {}).get("status") != "complete":
+                    continue
+                if current is not None and any(
+                    current.get(i["unit"]) != i["file_sha256"] for i in data.get("inputs") or []
+                ):
+                    continue  # stale
+                out[f"{data.get('program')}/{data.get('image')}"] = GccPta(data)
     return out

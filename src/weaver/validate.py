@@ -142,7 +142,7 @@ _MESON = re.compile(
 )
 
 
-def test_outcomes(stdout: str) -> dict[str, str]:
+def parse_test_outcomes(stdout: str) -> dict[str, str]:
     """Per-test results from a runner's output (CTest or Meson progress lines); empty if not recognised."""
     out: dict[str, str] = {}
     for line in stdout.splitlines():
@@ -341,8 +341,8 @@ def run_validation(project: Project, txn: dict[str, Any], keep: bool = False) ->
                 continue
             ra = _run_spec(t, base_ws, project) if built["baseline"] else None
             rb = _run_spec(t, cand_ws, project)
-            per_a = test_outcomes(ra.stdout_text(None)) if ra is not None else {}
-            per_b = test_outcomes(rb.stdout_text(None))
+            per_a = parse_test_outcomes(ra.stdout_text(None)) if ra is not None else {}
+            per_b = parse_test_outcomes(rb.stdout_text(None))
             extra: dict[str, Any] = {}
             if per_b and per_a:
                 # A test runner that reports individual tests (CTest): judge test by test.

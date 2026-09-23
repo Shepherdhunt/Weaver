@@ -205,3 +205,51 @@ def test_setup_and_capture_from_the_browser(tmp_path):
         assert len(c.api("pointers")["pointers"]) == 45
     finally:
         c.close()
+
+
+def test_test_detection_setup_and_settings_editor(tmp_path):
+    root = tmp_path / "fresh"
+    shutil.copytree(FIXTURE, root)
+    with (root / "Makefile").open("a") as mk:
+        mk.write("\ncheck: $(BUILD)/demo\n\t./$(BUILD)/demo > /dev/null\n")
+    c = Client(App())
+    try:
+        found = c.api(f"detect-tests?path={root}&build=make+-B+CC%3D%7Bcc%7D&cc=clang")
+        assert [t["run"] for t in found] == ["make check"]
+        c.api("detect-tests?path=/nonexistent/dir", status=404)
+        c.api(
+            "setup",
+            {
+                "path": str(root),
+                "build": "make -B CC={cc} BUILD=build/w",
+                "compiler": "clang",
+                "tests": ["make check BUILD=build/w"],
+            },
+        )
+        cfg = yaml.safe_load((root / "weaver.yaml").read_text())
+        val = cfg["profiles"][0]["validation"]
+        assert val["tests"] == [{"name": "make-check", "run": "make check BUILD=build/w", "cwd": "{workspace}"}]
+        assert val["build"]["run"] == "make -B CC=clang BUILD=build/w"
+        assert "testing" in cfg["acceptance"]["require"]
+        assert c.api("state")["validation"]["level"] == "behavioural"
+
+        st = c.api("settings")
+        prof = st["profiles"][0]
+        assert prof["tests"][0]["name"] == "make-check" and st["strength"]["level"] == "behavioural"
+        # drop the tests: validation becomes compile-only and the state says so
+        res = c.api("settings", {"profiles": [{"id": prof["id"], "tests": []}]})
+        assert res["settings"]["strength"]["level"] == "compile-only"  # 'testing' is required but nothing runs
+        assert any("nothing runs the changed program" in w for w in res["warnings"])
+        res = c.api(
+            "settings",
+            {
+                "acceptance": {"require": ["compile", "mechanical-recheck"]},
+                "profiles": [{"id": prof["id"], "tests": []}],
+            },
+        )
+        assert c.api("state")["validation"]["level"] == "compile-only"
+        assert (root / "weaver.yaml.bak").exists()
+        e = c.api("settings", {"acceptance": {"require": ["testing"]}}, status=409)  # 'compile' is mandatory
+        assert "compile" in e["error"]
+    finally:
+        c.close()

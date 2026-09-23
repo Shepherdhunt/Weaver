@@ -251,7 +251,9 @@ class LinkModel:
                 elif function in und:
                     out.append(("violated", f"{name}: library {lib['flag']} ({lib['path']}) calls {function} by name"))
             progs = [p for p in self.programs if name in p.images]
-            if function in {e for p in progs for e in p.entry_points}:
+            # Declared entry points (and main of an executable) are called from outside by construction.
+            # An undeclared shared object's exports are only *possible* entry points: handled below.
+            if function in {e for p in progs if p.configured or p.closed for e in p.entry_points}:
                 out.append(("violated", f"{name}: {function} is an entry point looked up by name at run time"))
                 continue
             if img.kind == "shared" and img.exports is not None and function in img.exports:

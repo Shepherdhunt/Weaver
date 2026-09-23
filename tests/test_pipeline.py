@@ -139,8 +139,10 @@ def test_transaction_lifecycle(tmp_path):
     assert txn["state"] == "validated", txn["validation"]["judgement"]
     kinds = {(r["kind"], r["outcome"]) for r in txn["validation"]["records"]}
     assert {("compile", "passed"), ("mechanical-recheck", "passed"), ("differential-testing", "passed")} <= kinds
+    assert txn["validation"]["strength"] == "behavioural"
 
-    led.accept(txn["id"])
+    txn = led.accept(txn["id"])
+    assert txn["acceptance"]["strength"] == "behavioural"
     patched = (root / "src/alias.c").read_text()
     assert "unsigned *p" not in patched and "    total += 2;\n" in patched
 
@@ -170,6 +172,26 @@ def test_stale_sources_block_validation(tmp_path):
         f.write("/* concurrent edit */\n")
     txn = led.validate(txn["id"])
     assert txn["state"] == "blocked" and "changed since it was analysed" in txn["validation"]["error"]
+
+
+@needs_clang
+def test_compile_only_acceptance_is_recorded_and_flagged(tmp_path, capsys):
+    from weaver.card import render_card
+
+    root = build_project(tmp_path, [{"id": "clang", "cc": "clang"}])  # no tests, default policy
+    run_cli(root, "collect")
+    run_cli(root, "inventory")
+    led = Ledger(load_project(root))
+    txn = led.validate(led.propose(finding_id(root, "la_basic", "p"))["id"])
+    assert txn["state"] == "validated" and txn["validation"]["strength"] == "compile-only"
+    assert "strength: compile-only" in render_card(txn)
+    assert run_cli(root, "accept", txn["id"]) == 0
+    assert "no test or differential run passed" in capsys.readouterr().err
+    txn = led.load(txn["id"])
+    assert txn["acceptance"]["strength"] == "compile-only"
+    assert "accepted without running the program" in txn["history"][-1]["note"]
+    run_cli(root, "ledger")
+    assert "[compile-only]" in capsys.readouterr().out
 
 
 @needs_clang

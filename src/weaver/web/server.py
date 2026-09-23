@@ -285,14 +285,23 @@ def route(app: App, method: str, path: str, q: dict[str, str], body: dict[str, A
         from weaver.flow.svf import run_flow
 
         def work_flow(job: Job) -> Any:
-            out = {}
+            from weaver.flow.gcc_pta import gcc_profile, run_gcc_pta
+
+            out: dict[str, Any] = {}
             for p in proj.profiles:
-                r = run_flow(proj, p, force=bool(body.get("force")))
-                job.write(f"[{p.id}] flow {r['status']}" + (f": {r.get('reason')}" if r.get("reason") else ""))
-                out[p.id] = r["status"]
+                if proj.flow.uses("svf"):
+                    r = run_flow(proj, p, force=bool(body.get("force")))
+                    job.write(f"[{p.id}] SVF {r['status']}" + (f": {r.get('reason')}" if r.get("reason") else ""))
+                    out[p.id] = {"svf": r["status"]}
+                if proj.flow.uses("gcc") and gcc_profile(proj, p):
+                    g = run_gcc_pta(proj, p, log=job.write)
+                    job.write(
+                        f"[{p.id}] GCC points-to {g['status']}" + (f": {g.get('reason')}" if g.get("reason") else "")
+                    )
+                    out.setdefault(p.id, {})["gcc"] = g["status"]
             return out
 
-        return app.start("flow", "Points-to analysis (SVF)", work_flow).to_json()
+        return app.start("flow", "Points-to analysis", work_flow).to_json()
     if (method, head) == ("GET", "settings"):
         from weaver.settings import read_settings
 

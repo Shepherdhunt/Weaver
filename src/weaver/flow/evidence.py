@@ -184,8 +184,28 @@ def flow_status(project: Project, inventory: dict[str, Any] | None = None) -> di
             "current": bool(flows) and all(fe is not None for fe in flows.values()),
             "complete": bool(flows)
             and all(fe is not None and fe.run.get("status") == "complete" for fe in flows.values()),
+            "gcc": _gcc_status(project, p.id, inventory),
         }
     return out
+
+
+def _gcc_status(project: Project, profile_id: str, inventory: dict[str, Any] | None) -> dict[str, Any] | None:
+    """The GCC points-to job's state for a profile: run status and how many image solutions are current."""
+    from weaver.flow.gcc_pta import load_gcc_pta
+
+    f = Store(project.state_dir).root / "flow" / profile_id / "gcc" / "run.json"
+    if not f.exists():
+        return None
+    run = read_json(f)
+    images = sum(len(p.get("images") or {}) for p in (run.get("programs") or {}).values())
+    current = load_gcc_pta(project, profile_id, inventory=inventory) if run.get("status") != "unavailable" else {}
+    return {
+        "status": run.get("status"),
+        "reason": run.get("reason"),
+        "images": images,
+        "current": len(current),
+        "complete": run.get("status") == "complete" and images > 0 and len(current) == images,
+    }
 
 
 def _safe_name(name: str) -> str:

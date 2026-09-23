@@ -134,10 +134,19 @@ class Program:
 
 
 def _matches_designator(w: dict[str, Any], designators: list[dict[str, Any]]) -> bool:
+    """Whether a by-name write may hit a call-site target ``&object``.
+
+    A global is matched by name alone: an ``extern`` declaration in a header and
+    the definition are one object with two declaration sites.  Two ``static``
+    globals of the same name in different files also match, which only makes the
+    answer more conservative.
+    """
     return any(
         d.get("name") == w.get("name")
-        and d.get("decl_file") == w.get("decl_file")
-        and d.get("decl_line") == w.get("decl_line")
+        and (
+            (d.get("global_") and w.get("global"))
+            or (d.get("decl_file") == w.get("decl_file") and d.get("decl_line") == w.get("decl_line"))
+        )
         for d in designators
     )
 

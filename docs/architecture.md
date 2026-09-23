@@ -1,4 +1,4 @@
-# Weaver architecture (milestones 1-2)
+# Weaver architecture (milestones 1-3)
 
 This document maps the planning documents to code, records design decisions, and lists known limits
 and next steps. "Tracker" refers to `pointer-tracker-plan.md`; "artifact" refers to
@@ -51,6 +51,29 @@ Milestone 2 adds three branches to that pipeline:
   web.server (stdlib HTTP, token + Host checks, background jobs) ──▶ web.api view models ──▶ static SPA
 ```
 
+Milestone 3 (the cFS pilot) makes these whole-program and production-compiler aware:
+
+```
+  links.json ──▶ link.LinkModel: images (executable / shared / relocatable), archive members the linker
+                 really loads (replayed with -Wl,-t,-t), -l libraries, dynamic exports and imports
+                      └──▶ programs: declared in weaver.yaml (closed, entry points) or one per image
+                                │
+       ┌────────────────────────┴───────────────────────────┐
+       ▼                                                    ▼
+  flow.svf: one wpa job per program                   flow.gcc_pta: production GCC recompiles each unit
+  (.weaver/flow/<profile>/programs/<p>/)              with -flto -fipa-pta, replays each image's link
+       │                                              (version script = the program's entry points and
+       │                                              imports), parses GCC's own points-to solution
+       ▼                                                    ▼
+  flow.program.may_modify (+ boundary models) ──▶ scalar-input may-modify ◀── GccPta.may_modify
+                                        (a "yes" from any backend wins; flow.agreement: all | any)
+
+  analysis.borrow ──▶ "borrowed" contracts (never written, never kept) over the same use graph
+  report ──▶ `weaver report`: per-scope evidence, recipe verdicts, blockers, sole blockers, contracts
+  testdetect + settings ──▶ validation commands at setup and in the settings editor
+  validate: per-test comparison (CTest, Meson) and a recorded strength (behavioural / compile-only)
+```
+
 ## Module map
 
 | Module | Plan section | Responsibility |
@@ -85,6 +108,12 @@ Milestone 2 adds three branches to that pipeline:
 | `validate.py` | tracker §7 | Isolated workspaces, path remapping, compile, mechanical re-check, builds, tests, differential runs, and judgement under the acceptance policy. |
 | `ledger.py`, `card.py` | tracker §6 | Transaction states, event log, checkpoints, three-way revert, and candidate cards. |
 | `llm/` | tracker §10, artifact §§10-11 | Evidence slice, planner instruction, and an optional Claude tool loop (read-only tools, transcripts saved). |
+| `link.py` | artifact §§3, 7 | Link model: images, archive members from a traced link replay, libraries and their undefined symbols, dynamic exports and imports, programs, and who outside the analysed code can call a function. |
+| `flow/gcc_pta.py` | artifact §§7, 10 | GCC-native flow evidence: LTO objects with `-fipa-pta`, image link replays, the `pta2` dump parser, and `may_modify` over GCC's points-to and clobber sets. |
+| `data/models/posix.yaml`, `data/models/cfs.yaml` | artifact §7 | Reviewed effect-model packs: POSIX/glibc (always loaded) and `builtin:cfs` (cFE/OSAL APIs as boundary models, framework-owned state, retained arguments). |
+| `analysis/borrow.py` | tracker §3 | The borrowed-pointer contract: follows a pointer through casts, copies and calls, and reports writes, retention and unknown sinks. |
+| `report.py` | tracker roadmap | `weaver report`: inventory and rejection report for a scope of the project. |
+| `testdetect.py`, `settings.py` | tracker §7 | Detecting a project's test commands (Make, CTest, Meson, scripts), and editing validation commands and the acceptance policy in `weaver.yaml` with a backup and reload check. |
 
 ## Design decisions
 
@@ -166,16 +195,78 @@ per-process token and a loopback `Host` header, accepts only JSON POSTs, and sen
 It inserts project text only through `textContent`. Long operations are background jobs with
 streamed logs, and only one modifying operation runs at a time.
 
+**Programs, not files, are the unit of whole-program claims.** A cFS build links cFE, OSAL and
+PSP into one executable, loads applications as shared objects by name, and builds host tools and
+test modules from the same tree. Linking every unit into one bitcode module fails (several `main`s)
+and would be wrong anyway. The link model groups images into programs. A declared program is
+closed over its images: only its entry points, and symbols another of its images imports, are
+callable from outside. An undeclared shared object is an open program whose every export may be
+called. Archive membership comes from replaying the captured link with `-Wl,-t,-t`, because a static
+link loads only the members that resolve a symbol.
+
+**Boundary models stand in for framework internals.** For an application, a cFE API call is a
+contract, not code to be re-analysed: `CFE_SB_TransmitMsg` copies the message, and
+`CFE_SB_ReceiveBuffer` writes only its first argument. A model marked `boundary: true` is used
+instead of the analysed body, even when that body is in the program. `writes_owned` models writes
+to framework-owned state (paths the pack `owns`), which can only matter for a pointer that may
+point there. Each boundary model in `data/models/cfs.yaml` was checked against the cFS v7.0.1
+source; three needed care: `CFE_TBL_Load`/`Manage`/`Validate` can call the application's
+validation callback, `OS_TimerCreate` writes arguments 1 and 3, and `OS_TaskCreate` keeps its stack
+pointer.
+
+**Borrowed pointers are a contract, not a recipe.** `SBBufPtr` points into a software-bus buffer
+that stays valid only until the next receive on the pipe. The `borrowed` expectation holds when no
+path writes through the pointer or anything derived from it, and none stores it anywhere that
+outlives the call (a global, the heap, a struct field, a return value). The check follows casts,
+`&p->field`, local copies and analysed callees' parameters. For modelled callees it uses their
+`writes` and `retains`. Any other sink is unknown, and a contract with unknowns cannot be pinned.
+
+**GCC's own points-to is the second backend.** SVF analyses Clang bitcode. For GCC profiles that
+is the secondary frontend's view of the code. `flow.gcc_pta` asks the production compiler instead:
+it recompiles each unit with its production command plus `-O1 -flto -fipa-pta`, with inlining and
+parameter-rewriting IPA passes off so functions keep their source shape. It then replays each
+image's captured link with LTO and reads GCC's `pta2` dump. `F.clobber` (what a call may write,
+callees and resolved indirect calls included) is intersected with `F.argN` (what the parameter may
+point to over all call sites), with `NONLOCAL`/`ESCAPED` treated conservatively. GCC names objects
+by declaration name, so two objects with the same name are merged. Two `static` functions of one
+name (LTO's `.lto_priv.N`) are united. Clones that may renumber parameters (`.isra`, `.constprop`,
+`.part`) make answers `unknown`. Each deviation from the production flags is recorded. Both merges
+can only add apparent overlaps. Solutions are keyed to the inventory's source hashes, and stale
+ones are not used.
+
+**Backends combine conservatively.** `flow.backend` selects `svf`, `gcc`, both (`auto`, the
+default: whatever is available) or `none`. A "may write" from any backend blocks the candidate.
+Under `flow.agreement: all` (the default), every backend that produced evidence must say "no
+write". With `any`, one "no" suffices and the disagreement is recorded in the precondition's
+evidence. Without SVF evidence, GCC's whole-image answer replaces the designator-only reasoning.
+SVF is therefore optional: a GCC project gets flow evidence with no AGPL component installed.
+
+**Validation strength is recorded, not implied.** A transaction that compiled and re-checked has
+not run. Validation records `strength: behavioural` only when a test or differential run passed on
+the patched tree, and acceptance copies it. The card, the ledger, the impact report and the web
+interface flag `compile-only` acceptances. The project's configured strength (compile-only,
+tests optional, or tests required) is shown in the top bar. Tests from runners that report
+individual results (CTest, Meson) are compared test by test against the unpatched baseline. A test
+that passes there and fails with the patch rejects the change. A test that fails on both is
+recorded as pre-existing and not attributed to the patch. Before this, one sandbox-dependent OSAL
+test made every cFS transaction fail validation.
+
 ## Known limits
 
 - Inventory facts are syntactic. Their possible targets are intraprocedural hypotheses, labelled as
   such. SVF points-to sets are flow- and context-insensitive and field-insensitive (Andersen).
-- Flow evidence for GCC profiles comes from Clang bitcode of the same sources. GIMPLE-derived
-  evidence from the production compiler is not collected yet.
+- GCC's points-to solution comes from an `-O1` LTO build, not the production `-O*` level, and
+  names objects by declaration name. Scalar-input is the only recipe that consults it so far.
+- Whole-program recipe evaluation on cFS takes about four minutes per recipe, with up to about
+  5 GB resident. ASTs are cached with a bounded LRU, but function summaries and flow evidence for
+  the whole program stay in memory.
 - `scalar-input` handles pointers to scalars that are spelled as plain pointer declarators. Struct
   targets, pointer-to-pointer, array parameters and typedef'd pointer parameters are blocked.
-- The fixture's effect models cover common libc functions. OSAL and cFS APIs need reviewed models
-  before interface recipes can pass through them.
+- Effect models cover POSIX/glibc and the cFE/OSAL APIs `sample_app` uses. Other cFS
+  applications will call APIs without a reviewed model, and those calls answer `unknown`.
+- cFS applications run in their own OSAL tasks. The pilot declares no concurrency model, so every
+  interface candidate stays blocked on `SI.no-concurrent-writers`. That is the right answer until
+  someone states which data each task owns.
 - `local-alias` covers automatic locals in a unit's main file. Pointers declared in headers need
   coverage across translation units and are reported as unresolved.
 - Coverage treats lines inside a parenthesized group opened on a covered line as covered, because
@@ -191,13 +282,13 @@ streamed logs, and only one modifying operation runs at a time.
 
 ## Next milestones (from the plans' roadmaps)
 
-1. **cFS pilot**: pin cFS and its submodules, capture the native configuration, and produce the
-   inventory, flow evidence and rejection report for `sample_app`. Add reviewed OSAL and cFE effect
-   models. Study `SBBufPtr` as a borrowed-buffer contract.
+1. **Per-task ownership for cFS**: a declared concurrency model finer than "single-threaded"
+   (which task owns which object), checked against OSAL task creation, so interface recipes can
+   pass `SI.no-concurrent-writers` in multi-task programs.
 2. **Output parameter to return value**: the second interface recipe. It needs "written on every
    path before any read" and the same complete-caller and may-modify machinery.
-3. **GCC flow evidence**: GIMPLE-derived alias and points-to facts from the production compiler,
-   cross-checked against the Clang/SVF evidence.
+3. **More GCC evidence**: use GCC's points-to in `local-alias` and in the borrow check, and read
+   modref summaries at the production optimization level.
 4. **Bounded checking**: CBMC equivalence harnesses as a `bounded-check` validation kind, recording
    unwinding bounds and assumptions.
 5. **Durable frontend**: a LibTooling exporter with Weaver's own schema and preprocessor callbacks

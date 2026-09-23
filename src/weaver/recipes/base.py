@@ -10,6 +10,7 @@ is eligible only when every precondition is established.
 
 from __future__ import annotations
 
+import collections
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -105,7 +106,9 @@ class RecipeContext:
         self.project = project
         self.inventory = inventory
         self.store = Store(project.state_dir)
-        self._tus: dict[str, TranslationUnit | None] = {}
+        # Parsed ASTs, least recently used first.  Bounded: a whole-program evaluation visits findings
+        # file by file, and keeping every unit's AST alive costs gigabytes on projects the size of cFS.
+        self._tus: collections.OrderedDict[str, TranslationUnit | None] = collections.OrderedDict()
         self._lex: dict[str, LexResult] = {}
         self._manifests: dict[str, dict[str, Any]] = {}
         self._macros: dict[str, dict[str, str]] = {}
@@ -127,12 +130,18 @@ class RecipeContext:
             self._manifests[uid] = read_json(self.store.unit_dir(unit["profile"], uid) / MANIFEST)
         return self._manifests[uid]
 
+    TU_CACHE = 48
+
     def tu(self, unit: dict[str, Any]) -> TranslationUnit | None:
         uid = unit["unit_id"]
-        if uid not in self._tus:
-            m = self.manifest(unit)
-            self._tus[uid] = load_unit_ast(m, self.store.unit_dir(unit["profile"], uid), str(self.root))
-        return self._tus[uid]
+        if uid in self._tus:
+            self._tus.move_to_end(uid)
+            return self._tus[uid]
+        m = self.manifest(unit)
+        tu = self._tus[uid] = load_unit_ast(m, self.store.unit_dir(unit["profile"], uid), str(self.root))
+        while len(self._tus) > self.TU_CACHE:
+            self._tus.popitem(last=False)
+        return tu
 
     def macros(self, unit: dict[str, Any]) -> dict[str, str]:
         uid = unit["unit_id"]
@@ -209,6 +218,19 @@ class RecipeContext:
 
             self._flows[profile_id] = load_flows(self.project, profile_id, self.inventory)
         return self._flows[profile_id]
+
+    def gcc(self, profile_id: str, program: str) -> dict[str, Any]:
+        """``program/image`` -> current GCC points-to solution for one program (see ``weaver.flow.gcc_pta``)."""
+        if not hasattr(self, "_gcc"):
+            self._gcc: dict[tuple[str, str], dict[str, Any]] = {}
+        key = (profile_id, program)
+        if key not in self._gcc:
+            from weaver.flow.gcc_pta import load_gcc_pta
+
+            self._gcc[key] = (
+                load_gcc_pta(self.project, profile_id, program, self.inventory) if self.project.flow.uses("gcc") else {}
+            )
+        return self._gcc[key]
 
     def programs_for_units(self, units: list[str]) -> dict[str, list[str]]:
         """``profile/program`` keys of the programs that link any of ``units``, with their unit ids."""

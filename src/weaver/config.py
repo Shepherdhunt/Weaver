@@ -124,6 +124,16 @@ class FlowConfig:
     options: list[str] = field(default_factory=lambda: ["-ander", "-field-limit=0"])
     model_files: list[Path] = field(default_factory=list)
     externals: dict[str, Any] = field(default_factory=dict)
+    # Points-to backends (``flow.backend``): 'svf' (separate AGPL tool, optional) and/or 'gcc' (the production
+    # GCC's own -fipa-pta).  'auto' uses every backend that is available for a profile.
+    backend: str = "auto"
+    backends: list[str] = field(default_factory=lambda: ["svf", "gcc"])
+    # 'all': every backend with evidence must say "no write" before a may-modify precondition holds;
+    # 'any': one backend's "no" suffices (disagreements are still recorded).  A "yes" always wins.
+    agreement: str = "all"
+
+    def uses(self, backend: str) -> bool:
+        return backend in self.backends
 
 
 @dataclass
@@ -255,8 +265,25 @@ def load_project(path: str | os.PathLike[str] | None = None) -> Project:
     )
     fl = raw.get("flow") or {}
     svf = fl.get("svf") or {}
+    backend = fl.get("backend", "auto")
+    if isinstance(backend, list):
+        backends = [str(b) for b in backend]
+        backend = ",".join(backends)
+    else:
+        backend = str(backend)
+        backends = {"auto": ["svf", "gcc"], "none": []}.get(
+            backend, [b.strip() for b in backend.split(",") if b.strip()]
+        )
+    if unknown := [b for b in backends if b not in ("svf", "gcc")]:
+        raise ConfigError(f"flow.backend: unknown backend(s) {unknown}; use auto, svf, gcc or none")
+    agreement = str(fl.get("agreement", "all"))
+    if agreement not in ("all", "any"):
+        raise ConfigError("flow.agreement must be 'all' or 'any'")
     flow = FlowConfig(
-        svf_enabled=bool(svf.get("enabled", True)),
+        backend=backend,
+        backends=backends,
+        agreement=agreement,
+        svf_enabled=bool(svf.get("enabled", True)) and "svf" in backends,
         wpa=str(svf["wpa"]) if svf.get("wpa") else None,
         timeout=float(svf.get("timeout", 900.0)),
         memory_mb=int(svf.get("memory_mb", 8192)),
