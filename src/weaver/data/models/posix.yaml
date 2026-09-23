@@ -1,0 +1,221 @@
+# Reviewed pointer-effect models for POSIX (IEEE Std 1003.1-2017) and glibc interfaces.
+#
+# Loaded by default after external_models.yaml.  Each entry follows the function's
+# specification: `writes` lists the 0-based arguments whose pointed-to objects the call
+# may modify; `calls_back: true` means the call may run program code (thread start
+# routines, signal or cleanup handlers, atfork handlers, module constructors) whose
+# effects Weaver cannot bound here, so any query through it stays unknown.
+#
+# Objects owned by the library (DIR streams, FILE buffers, static result buffers) are
+# not program objects; a call writing only those is modelled as writing its handle
+# argument where the handle is a program object, and nothing otherwise.
+#
+# `retains` lists pointer arguments the function keeps after it returns (absent: none).
+#
+# Concurrency is not modelled: another thread or a signal handler running while a
+# call blocks is covered by the preservation contract's concurrency declaration.
+schema: weaver.external-models/1
+reviewed: "2026-09-23"
+source: "POSIX.1-2017 function specifications; glibc 2.39 manual for GNU extensions"
+functions:
+  # -- compiler builtins (normalised names) -----------------------------------------------
+  va_start:  {writes: [0], calls_back: false, assumptions: ["only the va_list object is written"]}
+  va_end:    {writes: [0], calls_back: false, assumptions: ["only the va_list object is written"]}
+  va_copy:   {writes: [0], calls_back: false, assumptions: ["only the destination va_list is written"]}
+  va_arg:    {writes: [0], calls_back: false, assumptions: ["only the va_list object is written"]}
+  expect:    {writes: [], calls_back: false}
+  errno_location: {writes: [], calls_back: false, assumptions: ["returns the thread's errno object; writes through it are ordinary writes"]}
+  ctype_b_loc: {writes: [], calls_back: false}
+
+  # -- strings, conversion, time formatting ---------------------------------------------------
+  memchr:    {writes: [], calls_back: false}
+  toupper:   {writes: [], calls_back: false}
+  tolower:   {writes: [], calls_back: false}
+  strtol:    {writes: [1], calls_back: false}
+  strtoul:   {writes: [1], calls_back: false}
+  strtoll:   {writes: [1], calls_back: false}
+  strtoull:  {writes: [1], calls_back: false}
+  strerror:  {writes: [], calls_back: false, assumptions: ["may overwrite its own static message buffer"]}
+  strftime:  {writes: [0], calls_back: false}
+  gmtime_r:  {writes: [1], calls_back: false}
+  localtime_r: {writes: [1], calls_back: false}
+  htons:     {writes: [], calls_back: false}
+  ntohs:     {writes: [], calls_back: false}
+  htonl:     {writes: [], calls_back: false}
+  ntohl:     {writes: [], calls_back: false}
+  getenv:    {writes: [], calls_back: false}
+  sysconf:   {writes: [], calls_back: false}
+  backtrace: {writes: [0], calls_back: false}
+  perror:    {writes: [], calls_back: false}
+  getopt_long: {writes: [1, 4], calls_back: false, assumptions: ["may permute argv", "updates optind, optarg and opterr"]}
+
+  # -- clocks and timers --------------------------------------------------------------------
+  clock_gettime:   {writes: [1], calls_back: false}
+  clock_getres:    {writes: [1], calls_back: false}
+  clock_settime:   {writes: [], calls_back: false}
+  clock_nanosleep: {writes: [3], calls_back: false}
+  nanosleep:       {writes: [1], calls_back: false}
+  sleep:           {writes: [], calls_back: false}
+  usleep:          {writes: [], calls_back: false}
+  gettimeofday:    {writes: [0, 1], calls_back: false}
+  time:            {writes: [0], calls_back: false}
+  timer_create:    {writes: [2], calls_back: false, assumptions: ["the notification handler runs asynchronously (concurrency contract)"]}
+  timer_settime:   {writes: [3], calls_back: false}
+  timer_delete:    {writes: [], calls_back: false}
+
+  # -- threads and synchronisation -----------------------------------------------------------
+  pthread_create:  {writes: [0], calls_back: true, retains: [3], assumptions: ["the start routine runs concurrently"]}
+  pthread_exit:    {writes: [], calls_back: true, assumptions: ["cleanup handlers and TLS destructors run"]}
+  pthread_cancel:  {writes: [], calls_back: false, assumptions: ["the target thread's cleanup handlers run in that thread"]}
+  pthread_kill:    {writes: [], calls_back: true, assumptions: ["a signal to the calling thread runs its handler"]}
+  pthread_join:    {writes: [1], calls_back: false}
+  pthread_detach:  {writes: [], calls_back: false}
+  pthread_self:    {writes: [], calls_back: false}
+  pthread_equal:   {writes: [], calls_back: false}
+  pthread_key_create:  {writes: [0], calls_back: false}
+  pthread_getspecific: {writes: [], calls_back: false}
+  pthread_setspecific: {writes: [], calls_back: false, retains: [1], assumptions: ["the stored pointer is returned only by pthread_getspecific"]}
+  pthread_setcancelstate: {writes: [1], calls_back: false}
+  pthread_setcanceltype:  {writes: [1], calls_back: false}
+  pthread_sigmask:     {writes: [2], calls_back: false}
+  pthread_setname_np:  {writes: [], calls_back: false}
+  pthread_setaffinity_np: {writes: [], calls_back: false}
+  pthread_getschedparam: {writes: [1, 2], calls_back: false}
+  pthread_setschedparam: {writes: [], calls_back: false}
+  pthread_setschedprio:  {writes: [], calls_back: false}
+  pthread_attr_init:     {writes: [0], calls_back: false}
+  pthread_attr_destroy:  {writes: [0], calls_back: false}
+  pthread_attr_getschedparam: {writes: [1], calls_back: false}
+  pthread_attr_setdetachstate: {writes: [0], calls_back: false}
+  pthread_attr_setinheritsched: {writes: [0], calls_back: false}
+  pthread_attr_setschedparam: {writes: [0], calls_back: false}
+  pthread_attr_setschedpolicy: {writes: [0], calls_back: false}
+  pthread_attr_setstack: {writes: [0], calls_back: false}
+  pthread_attr_setstacksize: {writes: [0], calls_back: false}
+  pthread_mutex_init:    {writes: [0], calls_back: false}
+  pthread_mutex_destroy: {writes: [0], calls_back: false}
+  pthread_mutex_lock:    {writes: [0], calls_back: false}
+  pthread_mutex_trylock: {writes: [0], calls_back: false}
+  pthread_mutex_timedlock: {writes: [0], calls_back: false}
+  pthread_mutex_unlock:  {writes: [0], calls_back: false}
+  pthread_mutexattr_init: {writes: [0], calls_back: false}
+  pthread_mutexattr_destroy: {writes: [0], calls_back: false}
+  pthread_mutexattr_setprotocol: {writes: [0], calls_back: false}
+  pthread_mutexattr_settype: {writes: [0], calls_back: false}
+  pthread_cond_init:     {writes: [0], calls_back: false}
+  pthread_cond_destroy:  {writes: [0], calls_back: false}
+  pthread_cond_signal:   {writes: [0], calls_back: false}
+  pthread_cond_broadcast: {writes: [0], calls_back: false}
+  pthread_cond_wait:     {writes: [0, 1], calls_back: false}
+  pthread_cond_timedwait: {writes: [0, 1], calls_back: false}
+  pthread_rwlock_init:   {writes: [0], calls_back: false}
+  pthread_rwlock_destroy: {writes: [0], calls_back: false}
+  pthread_rwlock_rdlock: {writes: [0], calls_back: false}
+  pthread_rwlock_wrlock: {writes: [0], calls_back: false}
+  pthread_rwlock_unlock: {writes: [0], calls_back: false}
+  pthread_rwlockattr_init: {writes: [0], calls_back: false}
+  # glibc's pthread_cleanup_push/pop expansion
+  pthread_register_cancel:   {writes: [0], calls_back: false}
+  pthread_unregister_cancel: {writes: [0], calls_back: false}
+  pthread_unwind_next:       {writes: [], calls_back: true, assumptions: ["runs the registered cleanup handlers"]}
+  sem_init:      {writes: [0], calls_back: false}
+  sem_destroy:   {writes: [0], calls_back: false}
+  sem_post:      {writes: [0], calls_back: false}
+  sem_wait:      {writes: [0], calls_back: false}
+  sem_trywait:   {writes: [0], calls_back: false}
+  sem_timedwait: {writes: [0], calls_back: false}
+  sem_getvalue:  {writes: [1], calls_back: false}
+  sched_get_priority_max: {writes: [], calls_back: false}
+  sched_get_priority_min: {writes: [], calls_back: false}
+  sched_yield:   {writes: [], calls_back: false}
+
+  # -- signals and process control -------------------------------------------------------
+  sigaction:   {writes: [2], calls_back: false, assumptions: ["installed handlers run asynchronously (concurrency contract)"]}
+  signal:      {writes: [], calls_back: false, assumptions: ["installed handlers run asynchronously (concurrency contract)"]}
+  sigprocmask: {writes: [2], calls_back: false}
+  sigemptyset: {writes: [0], calls_back: false}
+  sigfillset:  {writes: [0], calls_back: false}
+  sigaddset:   {writes: [0], calls_back: false}
+  sigdelset:   {writes: [0], calls_back: false}
+  sigismember: {writes: [], calls_back: false}
+  sigwait:     {writes: [1], calls_back: false}
+  sigtimedwait: {writes: [1], calls_back: false}
+  sigsuspend:  {writes: [], calls_back: true, assumptions: ["returns after a signal handler has run"]}
+  sigsetjmp:   {writes: [0], calls_back: false}
+  libc_current_sigrtmin: {writes: [], calls_back: false}
+  libc_current_sigrtmax: {writes: [], calls_back: false}
+  kill:        {writes: [], calls_back: true, assumptions: ["a signal to this process may run a handler"]}
+  fork:        {writes: [], calls_back: true, assumptions: ["pthread_atfork handlers run"]}
+  execlp:      {writes: [], calls_back: true, assumptions: ["does not return on success"]}
+  waitpid:     {writes: [1], calls_back: false}
+  getpid:      {writes: [], calls_back: false}
+  getegid:     {writes: [], calls_back: false}
+  geteuid:     {writes: [], calls_back: false}
+  gethostid:   {writes: [], calls_back: false}
+  gethostname: {writes: [0], calls_back: false}
+  dlopen:      {writes: [], calls_back: true, assumptions: ["runs the loaded module's constructors"]}
+  dlclose:     {writes: [], calls_back: true, assumptions: ["runs the module's destructors"]}
+  dlsym:       {writes: [], calls_back: false}
+  dlerror:     {writes: [], calls_back: false, assumptions: ["may overwrite its own static message buffer"]}
+
+  # -- files, directories, streams ----------------------------------------------------------
+  open:      {writes: [], calls_back: false}
+  close:     {writes: [], calls_back: false}
+  read:      {writes: [1], calls_back: false}
+  write:     {writes: [], calls_back: false}
+  lseek:     {writes: [], calls_back: false}
+  fcntl:     {writes: [2], calls_back: false, assumptions: ["the variadic third argument is written for F_GETLK-style commands"]}
+  fstat:     {writes: [1], calls_back: false}
+  stat:      {writes: [1], calls_back: false}
+  statvfs:   {writes: [1], calls_back: false}
+  fchmod:    {writes: [], calls_back: false}
+  ftruncate: {writes: [], calls_back: false}
+  posix_fallocate: {writes: [], calls_back: false}
+  mkdir:     {writes: [], calls_back: false}
+  rmdir:     {writes: [], calls_back: false}
+  remove:    {writes: [], calls_back: false}
+  rename:    {writes: [], calls_back: false}
+  isatty:    {writes: [], calls_back: false}
+  opendir:   {writes: [], calls_back: false}
+  readdir:   {writes: [0], calls_back: false, assumptions: ["the returned entry is library-owned"]}
+  rewinddir: {writes: [0], calls_back: false}
+  closedir:  {writes: [0], calls_back: false}
+  fopen:     {writes: [], calls_back: false}
+  fclose:    {writes: [0], calls_back: false}
+  fread:     {writes: [0, 3], calls_back: false}
+  fwrite:    {writes: [3], calls_back: false}
+  fgetc:     {writes: [0], calls_back: false}
+  fgets:     {writes: [0, 2], calls_back: false}
+  setbuf:    {writes: any, calls_back: false, retains: [1], assumptions: ["the buffer is later written by stdio calls modelled as writing nothing"]}
+  mmap:      {writes: [], calls_back: false, assumptions: ["MAP_FIXED is not used over existing objects"]}
+  munmap:    {writes: [0], calls_back: false}
+  shmget:    {writes: [], calls_back: false}
+  shmat:     {writes: [], calls_back: false}
+  shmctl:    {writes: [2], calls_back: false}
+  ftok:      {writes: [], calls_back: false}
+  mq_open:   {writes: [], calls_back: false}
+  mq_close:  {writes: [], calls_back: false}
+  mq_unlink: {writes: [], calls_back: false}
+  mq_receive: {writes: [1, 3], calls_back: false}
+  mq_timedreceive: {writes: [1, 3], calls_back: false}
+  mq_send:   {writes: [], calls_back: false}
+  mq_timedsend: {writes: [], calls_back: false}
+
+  # -- sockets ------------------------------------------------------------------------------
+  socket:     {writes: [], calls_back: false}
+  bind:       {writes: [], calls_back: false}
+  listen:     {writes: [], calls_back: false}
+  connect:    {writes: [], calls_back: false}
+  accept:     {writes: [1, 2], calls_back: false}
+  shutdown:   {writes: [], calls_back: false}
+  sendto:     {writes: [], calls_back: false}
+  send:       {writes: [], calls_back: false}
+  recvfrom:   {writes: [1, 4, 5], calls_back: false}
+  recv:       {writes: [1], calls_back: false}
+  setsockopt: {writes: [], calls_back: false}
+  getsockopt: {writes: [3, 4], calls_back: false}
+  poll:       {writes: [0], calls_back: false}
+  select:     {writes: [1, 2, 3, 4], calls_back: false}
+  getaddrinfo: {writes: [3], calls_back: false}
+  freeaddrinfo: {writes: [0], calls_back: false}
+  getnameinfo: {writes: [2, 4], calls_back: false}

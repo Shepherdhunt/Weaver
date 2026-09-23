@@ -1,0 +1,118 @@
+# Reviewed pointer-effect models for NASA cFS APIs used by applications (builtin:cfs).
+#
+# Reviewed against cFE and OSAL as pinned by pilots/cfs (cFS v7.0.1: cfe c5fb2b4,
+# osal d2d877a): the public headers' parameter documentation and the implementations
+# cited per entry.  Argument indices are 0-based.
+#
+# `boundary: true` makes Weaver judge a call by the model instead of analysing the
+# definition, even when cFE/OSAL are part of the analysed program.  Deep closures
+# through cFE internals meet integer-address pool arithmetic and very large global
+# structures that points-to analysis cannot separate; the reviewed summary is both
+# more precise and easier to audit.
+#
+# `owns` names the files whose objects are the framework's own state.  `writes_owned:
+# true` means the call may write such state (tables, pipes, pools, registries,
+# telemetry counters) - never an object the application owns, unless the application
+# hands it over through a writing argument.  A pointer parameter whose target may be
+# framework-owned (an SB buffer, a table image) therefore still conflicts.
+#
+# `retains` lists pointer arguments kept after the call returns (absent: none; each API
+# below copies what it needs, e.g. CFE_SB_TransmitMsg copies the message, CFE_EVS_Register
+# copies the filter table).
+schema: weaver.external-models/1
+reviewed: "2026-09-23"
+source: "cFS v7.0.1 (cfe c5fb2b4, osal d2d877a)"
+owns: ["cfe/**", "osal/**", "psp/**", "build-*/**"]
+functions:
+  # -- Executive services -----------------------------------------------------------------
+  CFE_ES_RunLoop:
+    {writes: [0], calls_back: false, boundary: true, writes_owned: true,
+     assumptions: ["cfe_es_api.c CFE_ES_RunLoop: may set *RunStatus from the app's control request; accepts NULL"]}
+  CFE_ES_ExitApp:
+    {writes: [], calls_back: true, boundary: true, writes_owned: true,
+     assumptions: ["cfe_es_api.c CFE_ES_ExitApp: does not return normally; may reset the processor"]}
+  CFE_ES_PerfLogAdd:
+    {writes: [], calls_back: false, boundary: true, writes_owned: true,
+     assumptions: ["writes only the ES performance log in the reset area"]}
+  CFE_ES_WriteToSysLog:
+    {writes: [], calls_back: false, boundary: true, writes_owned: true,
+     assumptions: ["formats into ES-owned buffers; the format contains no %n conversion"]}
+  CFE_Config_GetVersionString:
+    {writes: [0], calls_back: false, boundary: true,
+     assumptions: ["cfe_config_get.c: writes at most Size bytes into Buf"]}
+
+  # -- Event services ------------------------------------------------------------------
+  CFE_EVS_Register:
+    {writes: [], calls_back: false, boundary: true, writes_owned: true,
+     assumptions: ["copies the filter table into EVS-owned registry state"]}
+  CFE_EVS_SendEvent:
+    {writes: [], calls_back: false, boundary: true, writes_owned: true,
+     assumptions: ["formats into an EVS-local buffer and transmits a copy on the software bus",
+                   "the format contains no %n conversion"]}
+
+  # -- Message access (cfe/modules/msg) ----------------------------------------------------
+  CFE_MSG_Init:       {writes: [0], calls_back: false, boundary: true, assumptions: ["initialises the header of *MsgPtr"]}
+  CFE_MSG_GetSize:    {writes: [1], calls_back: false, boundary: true}
+  CFE_MSG_GetFcnCode: {writes: [1], calls_back: false, boundary: true}
+  CFE_MSG_GetMsgId:   {writes: [1], calls_back: false, boundary: true}
+  CFE_MSG_SetMsgTime: {writes: [0], calls_back: false, boundary: true}
+
+  # -- Software bus -----------------------------------------------------------------------
+  CFE_SB_CreatePipe:
+    {writes: [0], calls_back: false, boundary: true, writes_owned: true}
+  CFE_SB_Subscribe:
+    {writes: [], calls_back: false, boundary: true, writes_owned: true}
+  CFE_SB_ReceiveBuffer:
+    {writes: [0], calls_back: false, boundary: true, writes_owned: true,
+     assumptions: ["cfe_sb.h: *BufPtr points into an SB-owned buffer, read-only, valid only until the next receive on the same pipe"]}
+  CFE_SB_TransmitMsg:
+    {writes: [], calls_back: false, boundary: true, writes_owned: true,
+     assumptions: ["cfe_sb_api.c CFE_SB_TransmitMsg: copies *MsgPtr into a pool buffer; the caller's message is not written"]}
+  CFE_SB_TimeStampMsg:
+    {writes: [0], calls_back: false, boundary: true, assumptions: ["writes the time field of *MsgPtr"]}
+  CFE_SB_IsValidMsgId: {writes: [], calls_back: false, boundary: true}
+
+  # -- Table services ------------------------------------------------------------------------
+  CFE_TBL_Register:
+    {writes: [0], calls_back: false, boundary: true, writes_owned: true,
+     assumptions: ["stores the validation function; it is called later by Load/Validate/Manage"]}
+  CFE_TBL_Load:
+    {writes: [], calls_back: true, boundary: true, writes_owned: true,
+     assumptions: ["cfe_tbl_load.c CFE_TBL_ValidateLoadInProgress calls the registered validation function"]}
+  CFE_TBL_Manage:
+    {writes: [], calls_back: true, boundary: true, writes_owned: true,
+     assumptions: ["may validate (registered callback) and activate a pending load"]}
+  CFE_TBL_Validate:
+    {writes: [], calls_back: true, boundary: true, writes_owned: true,
+     assumptions: ["calls the registered validation function"]}
+  CFE_TBL_GetAddress:
+    {writes: [0], calls_back: false, boundary: true, writes_owned: true,
+     assumptions: ["*TblPtr points to a TBL-owned table image until CFE_TBL_ReleaseAddress"]}
+  CFE_TBL_ReleaseAddress:
+    {writes: [], calls_back: false, boundary: true, writes_owned: true}
+  CFE_TBL_GetInfo:
+    {writes: [0], calls_back: false, boundary: true}
+
+  # -- OSAL (osal/src/os/inc) -------------------------------------------------------------
+  OS_printf:       {writes: [], calls_back: false, boundary: true, writes_owned: true,
+                    assumptions: ["the format contains no %n conversion"]}
+  OS_TaskDelay:    {writes: [], calls_back: false, boundary: true}
+  OS_GetLocalTime: {writes: [0], calls_back: false, boundary: true}
+  OS_strnlen:      {writes: [], calls_back: false, boundary: true}
+  OS_BinSemTake:   {writes: [], calls_back: false, boundary: true, writes_owned: true}
+  OS_BinSemGive:   {writes: [], calls_back: false, boundary: true, writes_owned: true}
+  OS_CountSemTake: {writes: [], calls_back: false, boundary: true, writes_owned: true}
+  OS_CountSemGive: {writes: [], calls_back: false, boundary: true, writes_owned: true}
+  OS_MutSemTake:   {writes: [], calls_back: false, boundary: true, writes_owned: true}
+  OS_MutSemGive:   {writes: [], calls_back: false, boundary: true, writes_owned: true}
+  OS_QueueGet:     {writes: [1, 3], calls_back: false, boundary: true, writes_owned: true}
+  OS_QueuePut:     {writes: [], calls_back: false, boundary: true, writes_owned: true}
+  OS_OpenCreate:   {writes: [0], calls_back: false, boundary: true, writes_owned: true}
+  OS_close:        {writes: [], calls_back: false, boundary: true, writes_owned: true}
+  OS_read:         {writes: [1], calls_back: false, boundary: true, writes_owned: true}
+  OS_write:        {writes: [], calls_back: false, boundary: true, writes_owned: true}
+  OS_TaskGetId:    {writes: [], calls_back: false, boundary: true}
+  OS_TaskCreate:   {writes: [0], calls_back: true, boundary: true, writes_owned: true, retains: [3],
+                    assumptions: ["the task entry point runs concurrently"]}
+  OS_TimerCreate:  {writes: [0, 2], calls_back: true, boundary: true, writes_owned: true,
+                    assumptions: ["the timer callback runs asynchronously"]}

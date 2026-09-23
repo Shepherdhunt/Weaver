@@ -58,8 +58,12 @@ def build_capture(project: Project, log: Log = _print) -> dict[str, Any]:
             log(f"    {line}")
         if p.returncode != 0:
             raise WeaverError(f"profile {prof.id}: capture build failed (exit {p.returncode})")
-        res = finalize(log_path, prof.compile_commands.parent)
-        log(f"[{prof.id}] captured {res['compile_entries']} compile command(s), {res['links']} link(s)")
+        res = finalize(log_path, prof.compile_commands.parent, cap.exclude, str(project.root))
+        extra = f"; {res['excluded_invocations']} build-system probe(s) or excluded source(s) set aside"
+        log(
+            f"[{prof.id}] captured {res['compile_entries']} compile command(s), {res['links']} link(s)"
+            + (extra if res["excluded_invocations"] else "")
+        )
         out[prof.id] = res
     return out
 
@@ -87,7 +91,7 @@ def refresh(
             log(f"    failed: {f['file']}: {f['detail']}")
         summary.setdefault("collect", {})[prof.id] = res
         if fidelity and prof.secondary_frontend is not None:
-            fr = run_fidelity(project, prof)
+            fr = run_fidelity(project, prof, jobs=jobs)
             counts: dict[str, int] = {}
             for u in fr.get("units", []):
                 counts[u["evidence_status"]] = counts.get(u["evidence_status"], 0) + 1
@@ -100,7 +104,7 @@ def refresh(
     run_it = flow if flow is not None else bool(project.flow.svf_enabled and find_wpa(project))
     if run_it:
         for prof in project.profiles:
-            fr = run_flow(project, prof)
+            fr = run_flow(project, prof, log=log)
             log(f"[{prof.id}] flow: {fr['status']}" + (f" ({fr['reason']})" if fr.get("reason") else ""))
             summary.setdefault("flow", {})[prof.id] = fr["status"]
     else:

@@ -163,19 +163,22 @@ def cmd_flow(args: argparse.Namespace) -> int:
         if args.json:
             _print_json(res)
             continue
-        diag = res.get("diagnostics") or {}
         print(
-            f"profile {prof.id}: flow evidence {res['status']}"
-            + (f" ({res['reason']})" if res.get("reason") else "")
-            + (
-                f"; {diag.get('nodes')} pointer node(s), {diag.get('objects')} object(s), "
-                f"{diag.get('indirect_call_sites')} indirect call site(s)"
-                if diag
-                else ""
-            )
+            f"profile {prof.id}: flow evidence {res['status']}" + (f" ({res['reason']})" if res.get("reason") else "")
         )
-        for m in res.get("missing_units", []):
-            print(f"  missing: {m['file']}: {m['reason']}")
+        from weaver.flow.evidence import load_flows
+
+        flows = load_flows(proj, prof.id)
+        for name, p in (res.get("programs") or {}).items():
+            fe = flows.get(name) or flows.get(name.replace("/", "_"))
+            diag = (fe.run.get("diagnostics") if fe else None) or {}
+            n_units = len(p["units"]) if isinstance(p.get("units"), list) else p.get("units")
+            print(
+                f"  {name:<28} {p['status']:<10} {n_units} unit(s)"
+                + ("" if p.get("closed", True) else ", open")
+                + (f"; {diag.get('nodes')} pointer node(s), {diag.get('objects')} object(s)" if diag else "")
+                + (f"  ({p['reason']})" if p.get("reason") else "")
+            )
         rc |= 0 if res["status"] == "complete" else 1
     return rc
 
@@ -348,6 +351,12 @@ def cmd_accept(args: argparse.Namespace) -> int:
         f"{txn['id']} accepted: {', '.join(txn['acceptance']['post_hashes'])} updated; checkpoint "
         f"{txn['acceptance']['checkpoint']}.\nRun 'weaver refresh' before selecting the next candidate."
     )
+    if txn["acceptance"].get("strength") != "behavioural":
+        print(
+            "warning: accepted on compile and re-check evidence only; no test or differential run passed. "
+            "Configure tests under validation in weaver.yaml (or the web UI's settings) to check behaviour.",
+            file=sys.stderr,
+        )
     return 0
 
 
@@ -388,9 +397,10 @@ def cmd_ledger(args: argparse.Namespace) -> int:
         return 0
     for t in led.all():
         f = t["finding"]
+        weak = (t.get("acceptance") or {}).get("strength") == "compile-only"
         print(
             f"{t['id']}  {t['state']:<11} {t['recipe']:<12} {t['finding_id']:<14} {f.get('file')}:{f.get('line')} "
-            f"{f.get('function')}() '{f.get('name')}'  {t['created_at']}"
+            f"{f.get('function')}() '{f.get('name')}'  {t['created_at']}" + ("  [compile-only]" if weak else "")
         )
     return 0
 
@@ -534,6 +544,76 @@ def cmd_auto(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_report(args: argparse.Namespace) -> int:
+    from weaver.report import build_report, render_markdown
+
+    proj = _project(args)
+    rep = build_report(proj, args.scope or [], log=lambda m: print(m, file=sys.stderr, flush=True))
+    text = json.dumps(rep, indent=2, default=str) if args.json else render_markdown(rep)
+    if args.output:
+        Path(args.output).write_text(text + "\n")
+        if args.json_output:
+            Path(args.json_output).write_text(json.dumps(rep, indent=2, default=str) + "\n")
+        print(f"wrote {args.output}")
+    else:
+        print(text)
+    return 0
+
+
+def cmd_tests(args: argparse.Namespace) -> int:
+    from weaver.settings import read_settings, write_settings
+
+    proj = _project(args)
+    st = read_settings(proj)
+    if args.add:
+        profs = [p for p in st["profiles"] if not args.profile or p["id"] == args.profile]
+        if len(profs) != 1:
+            raise WeaverError("choose a profile with --profile" if profs else f"unknown profile {args.profile!r}")
+        prof = profs[0]
+        tests = list(prof["tests"])
+        by_name = {s["name"]: s for s in prof["suggestions"]}
+        for a in args.add:
+            sug = by_name.get(a)
+            cmd = {"name": sug["name"], "run": sug["run"]} if sug else {"name": f"test{len(tests)}", "run": a}
+            if any(t["run"] == cmd["run"] for t in tests):
+                continue
+            tests.append(cmd)
+        build = args.build or (prof["build"] or {}).get("run") or prof["capture_build"]
+        change: dict[str, Any] = {"profiles": [{"id": prof["id"], "tests": tests, "build": {"run": build or ""}}]}
+        if not args.no_require and "testing" not in st["acceptance"]["require"]:
+            change["acceptance"] = {"require": [*st["acceptance"]["require"], "testing"]}
+        proj, warnings = write_settings(proj, change)
+        print(f"updated {proj.config_path} (previous version in {proj.config_path.name}.bak)")
+        for w in warnings:
+            print(f"warning: {w}", file=sys.stderr)
+        st = read_settings(proj)
+    if args.json:
+        _print_json(st)
+        return 0
+    s = st["strength"]
+    print(
+        f"validation strength: {s['level']}"
+        + (f" (policy requires {', '.join(s['required'])})" if s["required"] else "")
+    )
+    for n in s["notes"]:
+        print(f"  note: {n}")
+    for prof in st["profiles"]:
+        print(f"profile {prof['id']}:")
+        print(f"  build: {(prof['build'] or {}).get('run') or '(none)'}")
+        for t in prof["tests"]:
+            print(f"  test {t['name']}: {t['run']}")
+        for t in prof["compare"]:
+            print(f"  compare {t['name']}: {t['run']}")
+        configured = {t["run"].split()[0] for t in prof["tests"] if t["run"].split()}
+        for sug in prof["suggestions"]:
+            if sug["run"].split()[0] in configured:
+                continue  # the same runner is configured already (perhaps with another build directory)
+            print(f"  suggested {sug['name']}: {sug['run']}  ({sug['why']})")
+        if not prof["suggestions"] and not prof["tests"]:
+            print("  no test entry point found; add one with --add 'COMMAND'")
+    return 0
+
+
 def cmd_serve(args: argparse.Namespace) -> int:
     from weaver.config import CONFIG_NAME
     from weaver.web.server import serve
@@ -662,7 +742,9 @@ def build_parser() -> argparse.ArgumentParser:
     sp = add("contract", cmd_contract, "pin expected pointer behavior (checked by impact/check)")
     sp.add_argument("action", choices=["pin", "list", "expectations"])
     sp.add_argument("finding", nargs="?")
-    sp.add_argument("--expect", help="comma-separated: read-only, no-escape, no-identity, no-reassign, not-null-tested")
+    sp.add_argument(
+        "--expect", help="comma-separated: read-only, no-escape, no-identity, no-reassign, not-null-tested, borrowed"
+    )
     sp.add_argument("--reason")
 
     sp = add("graph", cmd_graph, "export the normalized evidence graph")
@@ -680,6 +762,24 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="do not request server-side refusal fallbacks (e.g. on platforms without them)",
     )
+
+    sp = add("report", cmd_report, "inventory and rejection report: what is eligible, what is blocked and why")
+    sp.add_argument("--scope", action="append", help="path prefix to report on (repeatable), e.g. apps/sample_app")
+    sp.add_argument("-o", "--output", help="write the report to a file")
+    sp.add_argument("--json-output", help="also write the full JSON report here (with -o)")
+    sp.add_argument("--json", action="store_true", help="print JSON instead of Markdown")
+
+    sp = add("tests", cmd_tests, "show validation strength; detect and configure the project's test commands")
+    sp.add_argument(
+        "--add",
+        action="append",
+        metavar="NAME|COMMAND",
+        help="add a suggested test (by name) or a shell command to the profile's validation tests (repeatable)",
+    )
+    sp.add_argument("--profile", help="profile to change (required when there are several)")
+    sp.add_argument("--build", help="validation build command (default: the capture command with the real compiler)")
+    sp.add_argument("--no-require", action="store_true", help="do not add 'testing' to acceptance.require")
+    sp.add_argument("--json", action="store_true")
 
     sp = add("serve", cmd_serve, "start the local web interface")
     sp.add_argument("project", nargs="?", help="project directory or weaver.yaml to open (default: -C or cwd)")

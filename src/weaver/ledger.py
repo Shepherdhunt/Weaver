@@ -145,7 +145,7 @@ class Ledger:
         return txn
 
     def validate(self, txn_id: str, keep: bool = False) -> dict[str, Any]:
-        from weaver.validate import judge, run_validation
+        from weaver.validate import judge, run_validation, validation_strength
 
         txn = self.load(txn_id)
         if txn["state"] not in OPEN_STATES | {TxnState.REJECTED.value}:
@@ -158,6 +158,7 @@ class Ledger:
             return txn
         state, reasons = judge(val["records"], self.project.acceptance.require)
         val["judgement"] = {"state": state, "reasons": reasons, "policy": self.project.acceptance.require}
+        val["strength"] = validation_strength(val["records"])
         txn["validation"] = val
         self.transition(
             txn,
@@ -198,12 +199,12 @@ class Ledger:
             "post_hashes": {f: sha256_bytes(new) for f, (_, new) in changes.items()},
             "checkpoint": str(ckpt),
             "policy": {"require": pol.require, "allow_provisional": pol.allow_provisional},
+            "strength": val.get("strength", "compile-only"),
         }
-        self.transition(
-            txn,
-            TxnState.ACCEPTED,
-            "patch applied; affected evidence is now stale and must be re-collected before the next selection",
-        )
+        note = "patch applied; affected evidence is now stale and must be re-collected before the next selection"
+        if txn["acceptance"]["strength"] != "behavioural":
+            note += "; accepted without running the program (no test or differential run passed)"
+        self.transition(txn, TxnState.ACCEPTED, note)
         return txn
 
     def skip(self, txn_id: str, reason: str = "") -> dict[str, Any]:

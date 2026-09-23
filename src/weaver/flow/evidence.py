@@ -1,4 +1,4 @@
-"""Queries over one profile's flow evidence (``flow.json``)."""
+"""Queries over flow evidence: one ``flow.json`` per program (see ``weaver.link``)."""
 
 from __future__ import annotations
 
@@ -28,15 +28,23 @@ class FlowEvidence:
             elif loc.get("kind") == "arg":
                 self.args.setdefault((loc.get("function"), loc.get("arg_index")), []).append(n["id"])
         self.decl_objects: dict[tuple[str | None, int | None, str | None], list[int]] = {}
+        self.globals_by_name: dict[str, list[dict[str, Any]]] = {}
         for o in data["objects"]:
             loc = o.get("loc") or {}
             self.decl_objects.setdefault((loc.get("file"), loc.get("line"), o.get("name")), []).append(o["id"])
+            if o.get("kind") == "global" and o.get("name"):
+                self.globals_by_name.setdefault(o["name"], []).append(o)
         self.indirect = {(c["file"], c["line"], c["col"]): c for c in data.get("indirect_calls", [])}
 
     # -- status ----------------------------------------------------------
     @property
     def complete(self) -> bool:
-        return self.run.get("status") == "complete"
+        """Complete and closed: every caller of every function is inside the analysed program."""
+        return self.run.get("status") == "complete" and self.run.get("closed", True)
+
+    @property
+    def program(self) -> str | None:
+        return self.run.get("program")
 
     @property
     def evidence_status(self) -> str:
@@ -46,12 +54,14 @@ class FlowEvidence:
         svf = self.run.get("svf") or {}
         return {
             "profile": self.run.get("profile"),
+            "program": self.run.get("program"),
+            "closed": self.run.get("closed", True),
             "status": self.run.get("status"),
             "evidence_status": self.evidence_status,
             "svf": svf.get("source"),
             "wpa_sha256": svf.get("wpa_sha256"),
             "options": (self.run.get("job") or {}).get("argv", [])[1:-1],
-            "program_sha256": (self.run.get("program") or {}).get("sha256"),
+            "program_sha256": (self.run.get("program_bc") or {}).get("sha256"),
             "fact_kind": "pointer-analysis",
         }
 
@@ -78,8 +88,23 @@ class FlowEvidence:
                 ids.append(nid)
         return self.pts(ids), len(ids)
 
-    def objects_for_decl(self, file: str | None, line: int | None, name: str | None) -> set[int]:
-        return set(self.decl_objects.get((file, line, name), []))
+    def objects_for_decl(self, file: str | None, line: int | None, name: str | None, global_: bool = False) -> set[int]:
+        """Objects declared at a source position; for globals, also by name.
+
+        A write names a global through the declaration visible in its unit (often
+        an ``extern`` in a header), while SVF places the object at its definition.
+        Within one program a global with external linkage has one definition, so
+        a unique global object of that name is it; several (file-scope statics
+        of the same name) are narrowed by file, and otherwise all are returned.
+        """
+        hit = set(self.decl_objects.get((file, line, name), []))
+        if hit or not global_ or not name:
+            return hit
+        cands = self.globals_by_name.get(name, [])
+        if len(cands) > 1:
+            same = [o for o in cands if (o.get("loc") or {}).get("file") == file]
+            cands = same or cands
+        return {o["id"] for o in cands}
 
     def indirect_targets(self, file: str | None, line: int | None, col: int | None) -> list[str] | None:
         c = self.indirect.get((file, line, col))
@@ -102,10 +127,15 @@ class FlowEvidence:
         }
 
 
-def load_flow(project: Project, profile_id: str, inventory: dict[str, Any] | None = None) -> FlowEvidence | None:
-    """Load a profile's flow evidence if it exists and describes the current sources."""
-    d = Store(project.state_dir).root / "flow" / profile_id
-    if not (d / "flow.json").exists() or not (d / "run.json").exists():
+def _program_dirs(project: Project, profile_id: str) -> dict[str, Any]:
+    d = Store(project.state_dir).root / "flow" / profile_id / "programs"
+    if not d.is_dir():
+        return {}
+    return {p.name: p for p in sorted(d.iterdir()) if (p / "run.json").exists()}
+
+
+def _load_program(d: Any, inventory: dict[str, Any] | None, profile_id: str) -> FlowEvidence | None:
+    if not (d / "flow.json").exists():
         return None
     run = read_json(d / "run.json")
     if inventory is not None:
@@ -113,14 +143,29 @@ def load_flow(project: Project, profile_id: str, inventory: dict[str, Any] | Non
         for i in run.get("inputs", []):
             if current.get(i["unit"]) != i["file_sha256"]:
                 return None  # stale: evidence no longer describes the sources
-        if (
-            set(current)
-            - {i["unit"] for i in run.get("inputs", [])}
-            - {m.get("unit") for m in run.get("missing_units", [])}
-        ):
-            # new units since the run: treat as incomplete rather than silently partial
-            run = {**run, "status": "incomplete", "reason": "units added since the flow run"}
     return FlowEvidence(read_json(d / "flow.json"), run)
+
+
+def load_flows(
+    project: Project, profile_id: str, inventory: dict[str, Any] | None = None
+) -> dict[str, FlowEvidence | None]:
+    """Program name -> its current flow evidence (None when absent, failed or stale)."""
+    return {name: _load_program(d, inventory, profile_id) for name, d in _program_dirs(project, profile_id).items()}
+
+
+def load_flow(
+    project: Project, profile_id: str, inventory: dict[str, Any] | None = None, program: str | None = None
+) -> FlowEvidence | None:
+    """One program's flow evidence; without ``program``, the profile's only program."""
+    dirs = _program_dirs(project, profile_id)
+    if program is None:
+        if len(dirs) != 1:
+            return None
+        program = next(iter(dirs))
+    from weaver.flow.svf import _safe
+
+    d = dirs.get(program) or dirs.get(_safe(program))
+    return _load_program(d, inventory, profile_id) if d is not None else None
 
 
 def flow_status(project: Project, inventory: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -128,12 +173,22 @@ def flow_status(project: Project, inventory: dict[str, Any] | None = None) -> di
     for p in project.profiles:
         d = Store(project.state_dir).root / "flow" / p.id
         run = read_json(d / "run.json") if (d / "run.json").exists() else None
-        fe = load_flow(project, p.id, inventory)
+        flows = load_flows(project, p.id, inventory)
+        progs = (run or {}).get("programs") or {}
         out[p.id] = {
-            "run": {k: run.get(k) for k in ("status", "reason", "evidence_status", "started_at", "duration_s")}
-            if run
-            else None,
-            "current": fe is not None,
-            "complete": bool(fe and fe.complete),
+            "run": {k: run.get(k) for k in ("status", "reason", "started_at", "duration_s")} if run else None,
+            "programs": {
+                n: {**v, "current": flows.get(n) is not None or flows.get(_safe_name(n)) is not None}
+                for n, v in progs.items()
+            },
+            "current": bool(flows) and all(fe is not None for fe in flows.values()),
+            "complete": bool(flows)
+            and all(fe is not None and fe.run.get("status") == "complete" for fe in flows.values()),
         }
     return out
+
+
+def _safe_name(name: str) -> str:
+    from weaver.flow.svf import _safe
+
+    return _safe(name)

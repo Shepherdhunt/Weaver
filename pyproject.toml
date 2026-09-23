@@ -23,7 +23,7 @@ weaver = "weaver.cli:main"
 where = ["src"]
 
 [tool.setuptools.package-data]
-weaver = ["data/*", "web/static/*"]
+weaver = ["data/*", "data/models/*", "web/static/*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

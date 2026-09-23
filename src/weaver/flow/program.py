@@ -45,34 +45,43 @@ class ModResult:
 
 
 class Program:
-    def __init__(self, inventory: dict[str, Any], models: Models):
+    def __init__(self, inventory: dict[str, Any], models: Models, unit_programs: dict[str, set[str]] | None = None):
         self.inv = inventory
         self.models = models
         self.funcs: dict[str, dict[str, Any]] = inventory.get("functions", {})
         self.by_name: dict[str, list[str]] = {}
         for k, f in self.funcs.items():
             self.by_name.setdefault(f["name"], []).append(k)
+        # unit id -> programs linking it; a call resolves only to definitions linked into the same program
+        self.unit_programs = unit_programs or {}
+
+    def programs_of(self, key: str) -> set[str]:
+        return {p for u in self.funcs.get(key, {}).get("units", []) for p in self.unit_programs.get(u, set())}
 
     def resolve(self, caller: str, callee: str | None) -> list[str]:
         """Definitions a direct call may reach (static functions only within shared units)."""
         if not callee:
             return []
         cu = set(self.funcs.get(caller, {}).get("units", []))
+        cp = self.programs_of(caller)
         out = []
         for k in self.by_name.get(callee, []):
             f = self.funcs[k]
-            if not f["static"] or cu & set(f.get("units", [])):
-                out.append(k)
+            if f["static"] and not cu & set(f.get("units", [])):
+                continue
+            if cp and not cp & self.programs_of(k):
+                continue  # linked into a different program: this call cannot reach it
+            out.append(k)
         return out
 
     def callers_of(self, key: str) -> list[tuple[str, dict[str, Any]]]:
         name = self.funcs[key]["name"] if key in self.funcs else key.split("::")[-1]
-        out = []
-        for ck, f in self.funcs.items():
-            for c in f["calls"]:
-                if c["callee"] == name and key in self.resolve(ck, name):
-                    out.append((ck, c))
-        return out
+        if not hasattr(self, "_calls_by_callee"):
+            self._calls_by_callee: dict[str, list[tuple[str, dict[str, Any]]]] = {}
+            for ck, f in self.funcs.items():
+                for c in f["calls"]:
+                    self._calls_by_callee.setdefault(c["callee"], []).append((ck, c))
+        return [(ck, c) for ck, c in self._calls_by_callee.get(name, []) if key in self.resolve(ck, name)]
 
     def closure(self, key: str, flows: list[FlowEvidence | None]) -> tuple[list[str], list[dict[str, Any]]]:
         """Functions reachable from ``key`` and the reasons the set may be incomplete."""
@@ -86,6 +95,8 @@ class Program:
             seen.append(k)
             f = self.funcs[k]
             for c in f["calls"]:
+                if self.models.is_boundary(c["callee"]):
+                    continue  # judged by its reviewed model in may_modify
                 targets = self.resolve(k, c["callee"])
                 stack.extend(t for t in targets if t not in seen)
             for c in f["indirect_calls"]:
@@ -129,6 +140,30 @@ def _matches_designator(w: dict[str, Any], designators: list[dict[str, Any]]) ->
         and d.get("decl_line") == w.get("decl_line")
         for d in designators
     )
+
+
+def _owned_targets(
+    model: Any,
+    targets: dict[str, set[int] | None],
+    usable: dict[str, FlowEvidence],
+    designators: list[dict[str, Any]] | None,
+) -> list[str] | None:
+    """Names of possible targets that are framework-owned (None when the targets are unknown)."""
+    out: list[str] = []
+    known = False
+    for p, fe in usable.items():
+        objs = targets.get(p)
+        if objs is None:
+            continue
+        known = True
+        for o in objs:
+            d = fe.describe(o)
+            if model.owned(d.get("file")):
+                out.append(str(d.get("name")))
+    if not known and designators is not None:
+        known = True
+        out.extend(str(d.get("name")) for d in designators if model.owned(d.get("decl_file")))
+    return sorted(set(out)) if known else None
 
 
 def may_modify(
@@ -193,7 +228,7 @@ def may_modify(
             what = f"writes '{w['name']}' by name"
             if have_pts:
                 objs = {
-                    p: fe.objects_for_decl(w.get("decl_file"), w.get("decl_line"), w["name"])
+                    p: fe.objects_for_decl(w.get("decl_file"), w.get("decl_line"), w["name"], True)
                     for p, fe in usable.items()
                 }
                 if any(not v for v in objs.values()):
@@ -234,9 +269,12 @@ def may_modify(
             if objs:
                 check_objects(objs, f, site, "write through a pointer")
         for c in f["calls"]:
-            if program.resolve(k, c["callee"]):
+            boundary = program.models.is_boundary(c["callee"])
+            if program.resolve(k, c["callee"]) and not boundary:
                 continue
-            res.checked["external_calls"] = res.checked.get("external_calls", 0) + 1
+            res.checked["boundary_calls" if boundary else "external_calls"] = (
+                res.checked.get("boundary_calls" if boundary else "external_calls", 0) + 1
+            )
             model = program.models.lookup(c["callee"])
             site = c.get("site")
             if model is None:
@@ -249,6 +287,20 @@ def may_modify(
             if model.writes == "any":
                 reason("external", "unknown", f, site, f"{c['callee']}() may write any object")
                 continue
+            if model.writes_owned:
+                owned = _owned_targets(model, targets, usable, designators)
+                if owned is None:
+                    reason(
+                        "external",
+                        "unknown",
+                        f,
+                        site,
+                        f"{c['callee']}() writes framework-owned state; the parameter's targets are unknown",
+                    )
+                    continue
+                if owned:
+                    reason("write", "yes", f, site, f"{c['callee']}() may write framework-owned {', '.join(owned)}")
+                    continue
             for i in model.writes:
                 if i >= len(c["args"]):
                     continue
@@ -259,7 +311,9 @@ def may_modify(
                     fake = {"name": d.get("name"), "decl_file": d.get("decl_file"), "decl_line": d.get("decl_line")}
                     if have_pts:
                         objs = {
-                            p: fe.objects_for_decl(d.get("decl_file"), d.get("decl_line"), d.get("name"))
+                            p: fe.objects_for_decl(
+                                d.get("decl_file"), d.get("decl_line"), d.get("name"), bool(d.get("global_"))
+                            )
                             for p, fe in usable.items()
                         }
                         if all(objs.values()):

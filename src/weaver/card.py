@@ -97,6 +97,14 @@ def render_card(txn: dict[str, Any]) -> str:
         j = val.get("judgement") or {}
         if j.get("reasons"):
             add(f"    judgement: {j['state']} — " + "; ".join(j["reasons"]))
+        strength = val.get("strength")
+        if strength == "compile-only":
+            add(
+                "    strength: compile-only — the patch builds and re-checks, but no test or differential run "
+                "executed it; behaviour is not validated"
+            )
+        elif strength:
+            add(f"    strength: {strength} — a test or differential run passed on the patched tree")
     add(
         "    limits: testing and differential runs cover only the exercised inputs; the mechanical re-check "
         "covers only the analysed configurations; no universal equivalence proof is claimed."
@@ -108,7 +116,10 @@ def render_card(txn: dict[str, Any]) -> str:
     add(f"    state {txn['state']}; history: " + " -> ".join(h["state"] for h in txn.get("history", [])))
     acc = txn.get("acceptance")
     if acc:
-        add(f"    checkpoint {acc['checkpoint']} (revert with 'weaver revert {txn['id']}')")
+        add(
+            f"    checkpoint {acc['checkpoint']} (revert with 'weaver revert {txn['id']}')"
+            + (f"; accepted on {acc['strength']} evidence" if acc.get("strength") else "")
+        )
     elif patch:
         add("    not applied; the working tree is unchanged")
     return "\n".join(out)

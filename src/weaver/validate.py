@@ -35,16 +35,30 @@ from weaver.util import atomic_write_bytes, now_iso, run
 
 
 class Remapper:
-    """Rewrite paths under the project root to the same paths under a workspace."""
+    """Rewrite paths under the project root to the same paths under a workspace.
+
+    A path that exists under the root but was not copied into the workspace
+    (a directory in ``workspace_exclude``, such as a build tree holding
+    generated headers) keeps pointing at the original: it is a read-only input.
+    """
 
     def __init__(self, root: Path, ws: Path):
         roots = {str(root), os.path.realpath(root)}
-        self.patterns = [(re.compile(re.escape(r) + r"(?=/|$)"), str(ws)) for r in sorted(roots, key=len, reverse=True)]
+        self.patterns = [
+            (re.compile(re.escape(r) + r"(?=/|$)([^\s:]*)"), r) for r in sorted(roots, key=len, reverse=True)
+        ]
         self.ws = ws
 
+    def _sub(self, m: re.Match[str], root: str) -> str:
+        rest = m.group(1)
+        mapped = str(self.ws) + rest
+        if rest and not os.path.lexists(mapped) and os.path.lexists(root + rest):
+            return m.group(0)
+        return mapped
+
     def __call__(self, s: str) -> str:
-        for pat, repl in self.patterns:
-            s = pat.sub(repl, s)
+        for pat, root in self.patterns:
+            s = pat.sub(lambda m, r=root: self._sub(m, r), s)
         return s
 
     def cmd(self, c: CompileCommand) -> CompileCommand:
@@ -115,6 +129,66 @@ def _ast_for(
     if not r.ok:
         return None, r.stderr_text(4000)
     return inv.outputs[0], ""
+
+
+_CTEST = re.compile(
+    r"^\s*\d+/\d+ Test\s+#\d+: (?P<name>\S+) \.*\s*(?:\*\*\*)?(?P<result>Passed|Failed|Not Run|Timeout|"
+    r"Exception[^\d]*|SEGFAULT|Skipped|Disabled)"
+)
+
+
+_MESON = re.compile(
+    r"^\s*\d+/\d+\s+(?P<name>\S.*?)\s+(?P<result>OK|FAIL|SKIP|EXPECTEDFAIL|UNEXPECTEDPASS|TIMEOUT|ERROR)\s+[\d.]+s\b"
+)
+
+
+def test_outcomes(stdout: str) -> dict[str, str]:
+    """Per-test results from a runner's output (CTest or Meson progress lines); empty if not recognised."""
+    out: dict[str, str] = {}
+    for line in stdout.splitlines():
+        m = _CTEST.match(line)
+        if m:
+            r = m.group("result").strip()
+            out[m.group("name")] = (
+                "passed" if r == "Passed" else "skipped" if r in ("Skipped", "Disabled") else "failed"
+            )
+            continue
+        m = _MESON.match(line)
+        if m:
+            r = m.group("result")
+            out[m.group("name")] = "passed" if r in ("OK", "EXPECTEDFAIL") else "skipped" if r == "SKIP" else "failed"
+    return out
+
+
+def _compare_tests(base: dict[str, str], cand: dict[str, str]) -> tuple[ValidationOutcome, str, dict[str, Any]]:
+    regressions = sorted(n for n, r in cand.items() if r == "failed" and base.get(n) == "passed")
+    missing = sorted(n for n, r in base.items() if r == "passed" and n not in cand)
+    both_fail = sorted(n for n, r in cand.items() if r == "failed" and base.get(n) == "failed")
+    passed = sorted(n for n, r in cand.items() if r == "passed" and base.get(n) == "passed")
+    extra = {
+        "tests": {
+            "passed_both": len(passed),
+            "regressions": regressions,
+            "failing_on_baseline": both_fail,
+            "missing": missing,
+        }
+    }
+    if regressions or missing:
+        what = []
+        if regressions:
+            what.append(
+                f"{len(regressions)} test(s) pass on the baseline and fail with the patch: "
+                + ", ".join(regressions[:10])
+            )
+        if missing:
+            what.append(f"{len(missing)} test(s) did not run with the patch: {', '.join(missing[:10])}")
+        return ValidationOutcome.FAILED, "; ".join(what), extra
+    if not passed:
+        return ValidationOutcome.NOT_EVALUATED, "no test passes on both trees", extra
+    detail = f"{len(passed)} test(s) pass on both trees"
+    if both_fail:
+        detail += f"; {len(both_fail)} fail on both (pre-existing, not attributable): {', '.join(both_fail[:8])}"
+    return ValidationOutcome.PASSED, detail, extra
 
 
 def run_validation(project: Project, txn: dict[str, Any], keep: bool = False) -> dict[str, Any]:
@@ -267,13 +341,21 @@ def run_validation(project: Project, txn: dict[str, Any], keep: bool = False) ->
                 continue
             ra = _run_spec(t, base_ws, project) if built["baseline"] else None
             rb = _run_spec(t, cand_ws, project)
-            if rb.ok:
+            per_a = test_outcomes(ra.stdout_text(None)) if ra is not None else {}
+            per_b = test_outcomes(rb.stdout_text(None))
+            extra: dict[str, Any] = {}
+            if per_b and per_a:
+                # A test runner that reports individual tests (CTest): judge test by test.
+                outcome, detail, extra = _compare_tests(per_a, per_b)
+            elif rb.ok:
                 outcome, detail = ValidationOutcome.PASSED, "exit 0"
             elif ra is not None and not ra.ok:
                 outcome, detail = ValidationOutcome.NOT_EVALUATED, "test also fails on the unpatched baseline"
             else:
                 outcome, detail = ValidationOutcome.FAILED, f"exit {rb.returncode}: {rb.stderr_text(1500)}"
-            records.append(_record(ValidationKind.TEST, f"{prof.id}:{t.name}", outcome, detail, profile=prof.id))
+            records.append(
+                _record(ValidationKind.TEST, f"{prof.id}:{t.name}", outcome, detail, profile=prof.id, **extra)
+            )
         for t in v.compare:
             if not (built["candidate"] and built["baseline"]):
                 records.append(
@@ -335,6 +417,61 @@ def _manifest_for(project: Project, profile_id: str, c: CompileCommand) -> dict[
 
     p = Store(project.state_dir).unit_dir(profile_id, c.unit_id(profile_id)) / MANIFEST
     return read_json(p) if p.exists() else None
+
+
+BEHAVIOURAL_KINDS = (ValidationKind.TEST.value, ValidationKind.DIFFERENTIAL_TEST.value)
+
+
+def validation_strength(records: list[dict[str, Any]]) -> str:
+    """``behavioural`` when a test or differential run passed; ``compile-only`` otherwise.
+
+    Compile checks and the mechanical re-check establish that the patch builds and
+    has the intended shape; only running the program says anything about behaviour.
+    """
+    ok = any(r["kind"] in BEHAVIOURAL_KINDS and r["outcome"] == ValidationOutcome.PASSED.value for r in records)
+    return "behavioural" if ok else "compile-only"
+
+
+def configured_strength(project: Project) -> dict[str, Any]:
+    """How strong validation *can* be under the current configuration, before any transaction runs.
+
+    ``behavioural`` - tests or differential runs are configured and the acceptance
+    policy requires them; ``behavioural-optional`` - they are configured, but a
+    transaction whose tests could not run may still be accepted provisionally;
+    ``compile-only`` - nothing executes the patched program.
+    """
+    runs = {
+        p.id: {
+            "build": bool(p.validation.build),
+            "tests": len(p.validation.tests),
+            "compare": len(p.validation.compare),
+        }
+        for p in project.profiles
+    }
+    configured = any(r["tests"] or r["compare"] for r in runs.values())
+    required = [k for k in BEHAVIOURAL_KINDS if k in project.acceptance.require]
+    notes = []
+    if not configured:
+        level = "compile-only"
+        notes.append(
+            "no test or differential command is configured: a transaction is accepted once it compiles and its "
+            "patched AST re-checks; nothing runs the changed program"
+        )
+    elif not required:
+        level = "behavioural-optional"
+        notes.append(
+            "tests are configured but the acceptance policy does not require them (add 'testing' or "
+            "'differential-testing' to acceptance.require)"
+        )
+    else:
+        level = "behavioural"
+    for pid, r in runs.items():
+        if (r["tests"] or r["compare"]) and not r["build"]:
+            notes.append(
+                f"profile {pid}: tests run without a validation build; they see whatever the workspace copy already "
+                "contains unless the test command builds"
+            )
+    return {"level": level, "required": required, "profiles": runs, "notes": notes}
 
 
 def judge(records: list[dict[str, Any]], require: list[str]) -> tuple[str, list[str]]:

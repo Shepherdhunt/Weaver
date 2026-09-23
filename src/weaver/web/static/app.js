@@ -153,6 +153,14 @@ function renderTop() {
     info.append(h("span", { class: "pill warn", title: st.stale_files.join("\n") },
       h("span", { class: "dot" }), `${st.stale_files.length} file(s) changed since analysis`));
   }
+  const val = st.validation;
+  if (val) {
+    const weak = val.level !== "behavioural";
+    info.append(h("button", { class: "pill" + (weak ? " warn" : ""), onclick: () => openSettings(),
+      title: (val.notes || []).join("\n") || "tests run on every transaction and the acceptance policy requires them" },
+      h("span", { class: "dot", style: { color: weak ? "var(--warn)" : "var(--ok)" } }),
+      val.level === "compile-only" ? "validation: compile only" : val.level === "behavioural-optional" ? "tests not required" : "validation: tests"));
+  }
   const busy = (st.running || []).some((j) => j.state === "running");
   acts.append(
     h("button", { class: "btn primary", disabled: busy, onclick: () => compile(),
@@ -161,6 +169,7 @@ function renderTop() {
     h("button", { class: "btn", disabled: busy || !st.inventory || !st.svf_available, onclick: () => runFlow(),
       title: st.svf_available ? "Run SVF points-to analysis as a separate job" : "SVF is not installed (pip install weaver[flow])" },
       "Points-to"),
+    h("button", { class: "btn ghost", onclick: () => openSettings(), title: "Validation commands and acceptance policy" }, "Settings"),
     h("button", { class: "btn ghost", onclick: () => { S.state.project = null; renderWelcome(true); },
       title: "Open another project" }, "Open…"),
   );
@@ -199,8 +208,11 @@ function renderWelcome(keepProject) {
       "{cc} is replaced by a recording shim around the compiler; use a full rebuild so every file is seen."),
     f("setup-cc", "Production compiler", { value: "gcc" }, "The executable your build really uses (gcc, clang, a cross compiler…)."),
     f("setup-clean", "Clean command (optional)", { placeholder: "make clean" }),
-    f("setup-run", "Test or run command (optional, recommended)", { placeholder: "make test   or   ./build/app --self-test" },
-      "Run in the unpatched and patched trees after rebuilding with the real compiler; outputs must match before a change is accepted."),
+    h("div", { class: "field" }, h("label", { text: "Tests (recommended)" }),
+      h("div", { id: "setup-tests", class: "hint", text: "Without tests a change is accepted once it compiles and re-checks; nothing runs it." }),
+      h("button", { class: "btn small", onclick: () => detectSetupTests() }, "Detect test commands")),
+    f("setup-run", "Program run to compare (optional)", { placeholder: "./build/app --self-test" },
+      "Run in the unpatched and patched trees after rebuilding with the real compiler; exit status and output must match."),
     f("setup-secondary", "Analysis Clang for non-Clang compilers (optional)", { placeholder: "clang" },
       "Used as a labelled secondary frontend; fidelity checks decide how far its facts are trusted."),
     h("div", { class: "field" }, h("label", { for: "setup-conc", text: "Concurrency model (preservation contract)" }),
@@ -212,7 +224,9 @@ function renderWelcome(keepProject) {
       try {
         await api("setup", { path: v("setup-path"), build: v("setup-build"), compiler: v("setup-cc"),
           clean: v("setup-clean") || null, secondary: v("setup-secondary") || null, concurrency: v("setup-conc") || null,
-          run: v("setup-run") || null });
+          run: v("setup-run") || null,
+          tests: [...document.querySelectorAll("#setup-tests input[type=checkbox]:checked")].map((c) => c.value)
+            .concat(v("setup-test-extra") ? [v("setup-test-extra")] : []) });
         await boot();
         compile();
       } catch (e) { fail(e); }
@@ -232,6 +246,108 @@ function renderWelcome(keepProject) {
        ["5 · Guard", "Snapshot, then explain how later edits changed pointer behavior."]]
         .map(([t, d]) => h("div", { class: "step" }, h("b", { text: t }), d))),
   ));
+}
+
+async function detectSetupTests() {
+  const v = (id) => document.getElementById(id).value.trim();
+  const box = clear(document.getElementById("setup-tests"));
+  let found;
+  try {
+    found = await api(`detect-tests?path=${encodeURIComponent(v("setup-path"))}&build=${encodeURIComponent(v("setup-build"))}&cc=${encodeURIComponent(v("setup-cc"))}`);
+  } catch (e) { box.append(h("span", { text: e.message })); return; }
+  if (!found.length) box.append(h("div", { text: "No test entry point found (Makefile test/check target, CTest, Meson, test script). Add one below if the project has tests." }));
+  for (const t of found) {
+    box.append(h("label", { class: "check", title: t.why },
+      h("input", { type: "checkbox", value: t.run, checked: true }), " ", h("code", { text: t.run }),
+      h("span", { class: "d-sub", text: ` — ${t.why}${t.per_test ? " (compared test by test)" : ""}` })));
+  }
+  box.append(h("input", { id: "setup-test-extra", placeholder: "another test command (optional)" }));
+}
+
+// ---------------------------------------------------------------- settings
+async function openSettings() {
+  let st;
+  try { st = await api("settings"); } catch (e) { return fail(e); }
+  const cmdRow = (list, c, render) => {
+    const name = h("input", { value: c.name || "", placeholder: "name", class: "s-name", "aria-label": "name" });
+    const run = h("input", { value: c.run || "", placeholder: "shell command, run in the workspace", class: "s-run", "aria-label": "command" });
+    const timeout = h("input", { value: c.timeout || "", placeholder: "600", class: "s-timeout", "aria-label": "timeout (s)", type: "number", min: 1 });
+    const row = h("div", { class: "s-row" }, name, run, timeout,
+      h("button", { class: "btn small ghost", "aria-label": "Remove", onclick: () => { list.splice(list.indexOf(c), 1); render(); } }, "✕"));
+    for (const [el, k] of [[name, "name"], [run, "run"], [timeout, "timeout"]])
+      el.addEventListener("input", () => { c[k] = k === "timeout" ? (Number(el.value) || null) : el.value; });
+    return row;
+  };
+  const profBoxes = st.profiles.map((p) => {
+    const box = h("div", { class: "s-prof" });
+    const build = h("input", { value: (p.build && p.build.run) || "", placeholder: p.capture_build || "build command, run in each workspace", class: "s-run wide" });
+    build.addEventListener("input", () => { p.build = { ...(p.build || {}), run: build.value }; });
+    const render = () => {
+      clear(box);
+      box.append(h("h4", { text: `Profile ${p.id}` }),
+        h("div", { class: "field" }, h("label", { text: "Validation build (baseline and candidate workspaces)" }), build,
+          !p.build && p.capture_build ? h("button", { class: "btn small", onclick: () => { build.value = p.capture_build; p.build = { run: p.capture_build }; } }, "Use the capture build with the real compiler") : null),
+        h("div", { class: "field" }, h("label", { text: "Tests — a test that passes on the unpatched tree and fails with the patch rejects the change" }),
+          p.tests.map((c) => cmdRow(p.tests, c, render)),
+          h("button", { class: "btn small ghost", onclick: () => { p.tests.push({ name: `test${p.tests.length}`, run: "" }); render(); } }, "+ test")),
+        h("div", { class: "field" }, h("label", { text: "Differential runs — exit status and stdout must be identical on both trees" }),
+          p.compare.map((c) => cmdRow(p.compare, c, render)),
+          h("button", { class: "btn small ghost", onclick: () => { p.compare.push({ name: `compare${p.compare.length}`, run: "" }); render(); } }, "+ differential run")));
+      const have = new Set(p.tests.map((t) => (t.run || "").split(" ")[0]));
+      const sug = p.suggestions.filter((x) => !have.has(x.run.split(" ")[0]));
+      if (sug.length) box.append(h("div", { class: "field" }, h("label", { text: "Detected in the project" }),
+        sug.map((x) => h("div", { class: "s-sug" }, h("code", { text: x.run }), h("span", { class: "d-sub", text: " " + x.why }),
+          h("button", { class: "btn small", onclick: () => {
+            p.tests.push({ name: x.name, run: x.run });
+            if (!build.value && p.capture_build) { build.value = p.capture_build; p.build = { run: p.capture_build }; }
+            render();
+          } }, "Add")))));
+    };
+    render();
+    return box;
+  });
+  const req = new Set(st.acceptance.require);
+  const kindHelp = { compile: "patched units compile with the production compiler", "mechanical-recheck": "the patched AST satisfies the recipe's post-conditions",
+    testing: "configured tests pass (per test, against the baseline)", "differential-testing": "differential runs match the baseline" };
+  const policy = h("div", { class: "field" }, h("label", { text: "A transaction is validated only when these passed" }),
+    st.kinds.map((k) => h("label", { class: "check" }, h("input", { type: "checkbox", checked: req.has(k), disabled: k === "compile",
+      onchange: (e) => { e.target.checked ? req.add(k) : req.delete(k); } }), ` ${k} `, h("span", { class: "d-sub", text: kindHelp[k] || "" }))));
+  const prov = h("input", { type: "checkbox", checked: st.acceptance.allow_provisional });
+  const minEv = h("select", {}, st.evidence_levels.map((l) => h("option", { value: l, text: l, selected: l === st.acceptance.min_evidence })));
+  const conc = h("select", {}, h("option", { value: "", text: "not declared (interface recipes stay blocked)", selected: !st.concurrency }),
+    h("option", { value: "single-threaded", text: "single-threaded: nothing else writes during a call", selected: st.concurrency === "single-threaded" }));
+  const backend = h("select", {}, [["auto", "auto: every backend that is available"], ["svf", "SVF only"], ["gcc", "GCC IPA points-to only"], ["none", "none (reviewed models only)"]]
+    .map(([v, t]) => h("option", { value: v, text: t, selected: (st.flow.backend || "auto") === v })));
+  const level = st.strength.level;
+  const body = [
+    h("div", { class: "banner" + (level === "behavioural" ? " ok" : "") },
+      h("b", { text: level === "compile-only" ? "Compile-only validation. " : level === "behavioural-optional" ? "Tests are optional. " : "Behavioural validation. " }),
+      level === "behavioural" ? "Every transaction runs the configured tests in both trees before it can be accepted." : (st.strength.notes || []).join(" ")),
+    ...profBoxes,
+    h("h4", { text: "Acceptance policy" }), policy,
+    h("div", { class: "field" }, h("label", { class: "check" }, prov, " allow accepting provisional transactions (a required check could not run)")),
+    h("div", { class: "field" }, h("label", { text: "Minimum evidence for a candidate's facts" }), minEv),
+    h("h4", { text: "Preservation contract" }), h("div", { class: "field" }, conc),
+    h("h4", { text: "Flow evidence backend" }), h("div", { class: "field" }, backend,
+      h("div", { class: "hint", text: "SVF is an optional AGPL-licensed tool run as a separate process; GCC IPA points-to uses the production compiler itself." })),
+    h("div", { class: "hint", text: `Saving rewrites ${st.config} (comments are not kept; the previous file is saved as ${st.config.split("/").pop()}.bak).` }),
+  ];
+  modal("Validation and acceptance settings", body, (close) => [
+    h("button", { class: "btn primary", onclick: async () => {
+      try {
+        const res = await api("settings", {
+          acceptance: { require: [...req], allow_provisional: prov.checked, min_evidence: minEv.value },
+          concurrency: conc.value || null, flow: { backend: backend.value },
+          profiles: st.profiles.map((p) => ({ id: p.id, build: p.build || { run: "" }, tests: p.tests, compare: p.compare })),
+        });
+        close();
+        toast("Settings saved" + (res.warnings.length ? " — " + res.warnings.join(" ") : ""), res.warnings.length ? 9000 : 3200);
+        await refreshState();
+        await loadData();
+      } catch (e) { fail(e); }
+    } }, "Save"),
+    h("button", { class: "btn ghost", onclick: close }, "Cancel"),
+  ]);
 }
 
 // ---------------------------------------------------------------- workspace
@@ -730,7 +846,7 @@ function renderDetail() {
   // contracts
   const csec = h("div", { class: "section" }, h("h4", { text: "Contracts" }));
   for (const c of d.contracts) csec.append(h("div", { class: "d-sub", text: `${c.id}: must stay ${c.expect.join(", ")}${c.reason ? " — " + c.reason : ""}` }));
-  const exps = [["read-only", "read-only"], ["no-escape", "doesn't escape"], ["no-identity", "not compared"], ["no-reassign", "not reassigned"]];
+  const exps = [["read-only", "read-only"], ["no-escape", "doesn't escape"], ["no-identity", "not compared"], ["no-reassign", "not reassigned"], ["borrowed", "borrowed (never written or kept)"]];
   const checks = exps.map(([k, label]) => h("label", { style: { marginRight: "10px", fontSize: "12.5px" } }, h("input", { type: "checkbox", value: k }), " " + label));
   const reason = h("input", { type: "text", placeholder: "why this must hold (optional)", style: { width: "100%", marginTop: "6px", border: "1px solid var(--border)", borderRadius: "6px", padding: "4px 6px", background: "var(--code-bg)" } });
   csec.append(h("div", { class: "d-sub", text: "Pin today's behavior; “Changes” will flag any edit that breaks it." }), h("div", {}, checks), reason,
@@ -786,8 +902,11 @@ function openTxn(t) {
     const policy = (v.judgement && v.judgement.policy) || [];
     body.push(h("div", {}, h("h4", { text: "Validation" }),
       h("div", { class: "records" }, v.records.map((r) => h("div", {}, h("span", { class: r.outcome, text: r.outcome }), h("span", { text: r.kind }), h("span", { text: `${r.name}: ${r.detail}` })))),
-      policy.length ? h("div", { class: "d-sub", text: `Acceptance policy requires: ${policy.join(", ")}` + (policy.some((k) => k.includes("test")) ? "" : " (no tests or differential runs configured)") }) : null,
+      policy.length ? h("div", { class: "d-sub", text: `Acceptance policy requires: ${policy.join(", ")}` + (policy.some((k) => k.includes("test")) ? "" : " (tests are not required)") }) : null,
       v.judgement && v.judgement.reasons.length ? h("div", { class: "d-sub", text: "Judgement: " + v.judgement.reasons.join("; ") }) : null,
+      v.strength === "compile-only" ? h("div", { class: "banner" }, h("b", { text: "Compile-only. " }),
+        "The patch builds and its AST re-checks, but no test or differential run executed it. ",
+        h("a", { href: "#", onclick: (e) => { e.preventDefault(); openSettings(); } }, "Configure tests")) : null,
       h("div", { class: "d-sub", text: "Limits: tests and differential runs cover only exercised inputs; the mechanical re-check covers only analysed configurations. No universal proof is claimed." })));
   } else if (v && v.error) body.push(h("div", { class: "d-sub", style: { color: "var(--bad)" }, text: v.error }));
   if (t.patch) body.push(h("div", {}, h("h4", { text: `Patch (${c.edits.length} edit(s) in ${new Set(c.edits.map((e) => e.file)).size} file(s))` }), diffView(t.patch.diff)));
@@ -839,14 +958,20 @@ async function renderLedger(v) {
   let rows;
   try { rows = await api("ledger"); } catch (e) { return fail(e); }
   S.ledger = rows;
+  const val = S.state && S.state.validation;
+  if (val && val.level !== "behavioural") {
+    v.append(h("div", { class: "banner" }, h("b", { text: val.level === "compile-only" ? "Validation is compile-only. " : "Tests are not required. " }),
+      (val.notes || []).join(" ") + " ", h("a", { href: "#", onclick: (e) => { e.preventDefault(); openSettings(); } }, "Open settings")));
+  }
   if (!rows.length) {
     v.append(h("div", { class: "pad d-sub", text: "No transactions yet. Select an eligible pointer and choose “Propose…”." }));
     return;
   }
   v.append(h("table", { class: "table" },
-    h("thead", {}, h("tr", {}, ["Transaction", "State", "Recipe", "Pointer", "Where", "Created"].map((t) => h("th", { text: t })))),
+    h("thead", {}, h("tr", {}, ["Transaction", "State", "Validated by", "Recipe", "Pointer", "Where", "Created"].map((t) => h("th", { text: t })))),
     h("tbody", {}, rows.slice().reverse().map((t) => h("tr", { class: "click", onclick: async () => { try { openTxn(await api("ledger/" + t.id)); } catch (e) { fail(e); } } },
       h("td", { class: "mono", text: t.id }), h("td", {}, h("span", { class: `state ${t.state}`, text: t.state })),
+      h("td", {}, t.strength ? h("span", { class: "tag" + (t.strength === "compile-only" ? " weak" : ""), text: t.strength === "compile-only" ? "compile only" : "tests" }) : ""),
       h("td", { text: t.recipe }), h("td", { class: "mono", text: t.finding.name }),
       h("td", { class: "mono", text: `${t.finding.file}:${t.finding.line} ${t.finding.function ? t.finding.function + "()" : ""}` }),
       h("td", { text: (t.created_at || "").replace("T", " ").replace("+00:00", "Z") }))))));
@@ -882,6 +1007,8 @@ function impactReport(rep) {
   const box = h("div", { class: "report" });
   box.append(h("h3", {}, "Risk: ", h("span", { class: `risk ${rep.risk}`, text: rep.risk.toUpperCase() }),
     h("span", { class: "d-sub", style: { marginLeft: "10px" }, text: `since ${rep.base.name} · ${rep.summary.changed_files} changed file(s) · ${rep.summary.high} high · ${rep.summary.review} review · ${rep.summary.contracts_violated} contract(s) violated` })));
+  if (rep.validation && rep.validation.level === "compile-only") box.append(h("div", { class: "banner" }, h("b", { text: "No tests configured. " }),
+    "This report rests on pointer facts and contracts; revalidation can rebuild but has nothing to run."));
   if (rep.stale_inventory && rep.stale_inventory.length) box.append(h("div", { class: "d-sub", style: { color: "var(--warn)" }, text: `The analysis is older than ${rep.stale_inventory.length} file(s); compile again for an accurate comparison.` }));
   const rank = { high: 0, review: 1, info: 2 };
   const changes = rep.changes.slice().sort((a, b) => rank[a.severity] - rank[b.severity]);

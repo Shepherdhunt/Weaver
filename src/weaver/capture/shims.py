@@ -10,6 +10,7 @@ command), a link manifest and a tool manifest.
 
 from __future__ import annotations
 
+import fnmatch
 import os
 import shlex
 import stat
@@ -44,8 +45,35 @@ def make_shim(shim_dir: Path, name: str, real: str, log: Path, role: str = "comp
     return shim
 
 
-def finalize(log: Path, out_dir: Path) -> dict[str, Any]:
-    """Convert a capture log into compile_commands.json, links.json and tools.json."""
+# Compilations a build system runs to probe the toolchain; they are not part of the program.
+BUILD_SYSTEM_PROBES = (
+    "*/CMakeFiles/CMakeScratch/*",
+    "*/CMakeFiles/CMakeTmp/*",
+    "*/CMakeFiles/*/CompilerIdC/*",
+    "*/CMakeFiles/*/CompilerIdCXX/*",
+    "*/CMakeFiles/ShowIncludes/*",
+    "*/conftest.c",
+    "*/meson-private/*",
+)
+
+
+def _excluded(path: str, patterns: list[str], root: str | None) -> str | None:
+    rel = os.path.relpath(path, root) if root and os.path.isabs(path) else path
+    for pat in patterns:
+        if fnmatch.fnmatch(path, pat) or fnmatch.fnmatch(rel, pat):
+            return pat
+    return None
+
+
+def finalize(log: Path, out_dir: Path, exclude: list[str] | None = None, root: str | None = None) -> dict[str, Any]:
+    """Convert a capture log into compile_commands.json, links.json and tools.json.
+
+    Build-system probes (CMake compiler identification and try-compile scratch
+    projects, autoconf ``conftest.c``) and sources matching ``exclude`` are
+    recorded under ``excluded`` in other-invocations.json instead.
+    """
+    patterns = list(BUILD_SYSTEM_PROBES) + list(exclude or [])
+    excluded: list[dict[str, Any]] = []
     records = read_jsonl(log)
     if not records:
         raise WeaverError(f"capture log {log} is empty; did the build use the shims?")
@@ -65,6 +93,16 @@ def finalize(log: Path, out_dir: Path) -> dict[str, Any]:
             failed.append({"cwd": rec["cwd"], "argv": rec["argv"], "returncode": rec["returncode"]})
             continue
         pa = parse_driver_args(argv)
+        hits = [
+            (src, pat)
+            for src in pa.sources
+            if (pat := _excluded(os.path.normpath(os.path.join(rec["cwd"], src)), patterns, root))
+        ]
+        if not hits and _excluded(os.path.join(rec["cwd"], ""), patterns, root):
+            hits = [(rec["cwd"], "build-system probe directory")]
+        if hits:
+            excluded.append({"cwd": rec["cwd"], "argv": rec["argv"], "matched": [p for _, p in hits]})
+            continue
         if pa.action in ("-E",) or (pa.has_dep_flags and pa.action is None and not pa.output and pa.sources):
             other.append({"kind": "preprocess-or-deps", "cwd": rec["cwd"], "argv": rec["argv"]})
             continue
@@ -99,12 +137,13 @@ def finalize(log: Path, out_dir: Path) -> dict[str, Any]:
     write_json(out_dir / "compile_commands.json", compdb)
     write_json(out_dir / "links.json", links)
     write_json(out_dir / "tools.json", tools)
-    write_json(out_dir / "other-invocations.json", {"other": other, "failed": failed})
+    write_json(out_dir / "other-invocations.json", {"other": other, "failed": failed, "excluded": excluded})
     return {
         "compile_entries": len(compdb),
         "links": len(links),
         "tools": list(tools),
         "failed_invocations": len(failed),
+        "excluded_invocations": len(excluded),
         "other_invocations": len(other),
         "out_dir": str(out_dir),
     }

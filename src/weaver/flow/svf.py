@@ -131,7 +131,10 @@ def _limits(memory_mb: int):
     return apply
 
 
-def run_flow(project: Project, profile: Profile, force: bool = False) -> dict[str, Any]:
+def run_flow(project: Project, profile: Profile, force: bool = False, log: Any = None) -> dict[str, Any]:
+    """Build per-unit bitcode, then run one SVF job per program (see ``weaver.link``)."""
+    from weaver.link import link_model
+
     store = Store(project.state_dir)
     out = store.root / "flow" / profile.id
     out.mkdir(parents=True, exist_ok=True)
@@ -156,91 +159,160 @@ def run_flow(project: Project, profile: Profile, force: bool = False) -> dict[st
         write_json(out / "run.json", rec)
         return rec
 
-    # 1. frontend bitcode for every unit ------------------------------------
-    cmds = load_compdb(profile.compile_commands)
-    inputs, missing, producers = [], [], set()
-    seen_files: set[str] = set()
-    for c in cmds:
-        udir = store.unit_dir(profile.id, c.unit_id(profile.id))
-        mpath = udir / MANIFEST
-        if not mpath.exists():
-            missing.append({"file": rel_or_abs(c.file, project.root), "reason": "not collected"})
-            continue
-        m = read_json(mpath)
-        if c.file in seen_files:
-            missing.append({"file": m["file_rel"], "reason": "file compiled twice in this profile; first unit used"})
-            continue
-        san = sanitize(c)
-        if m["production_tool"]["family"] == "clang":
-            cc, opts, tool, status = c.compiler, san.options, identify(c.compiler, c.directory), "native"
-        elif m.get("secondary_tool") and (m.get("translation") or {}).get("options"):
-            cc = m["secondary_tool"]["path"]
-            opts, tool, status = m["translation"]["options"], identify(cc), m.get("ast_evidence_status")
-        else:
-            missing.append({"file": m["file_rel"], "reason": "no Clang frontend for this unit"})
-            continue
-        key = short_hash(m["cache_key"], "flow_bitcode", 1)
-        art = m.get("flow_bitcode")
-        bc = udir / "flow.flow.bc"
-        if force or not art or art.get("key") != key or not bc.exists():
-            res = _run_recipe("flow_bitcode", cc, opts, san, udir, "flow", "flow", tool, _status(status))
-            art = {
-                "key": key,
-                "status": res["status"],
-                "returncode": res["returncode"],
-                "argv": res["argv"],
-                "tool": res["tool"],
-            }
-            m["flow_bitcode"] = art
-            write_json(mpath, m)
-        if art["status"] != "ok":
-            missing.append({"file": m["file_rel"], "reason": f"bitcode failed (exit {art['returncode']})"})
-            continue
-        seen_files.add(c.file)
-        producers.add((tool.realpath or tool.requested, tool.version))
-        inputs.append(
-            {
-                "unit": m["unit_id"],
-                "file": m["file_rel"],
-                "file_sha256": m["file_sha256"],
-                "bitcode": str(bc),
-                "sha256": sha256_file(bc),
-                "evidence_status": status,
-                "directory": m["directory"],
-            }
-        )
+    # 1. frontend bitcode for every unit that belongs to a program -----------------
+    lm = link_model(project, profile)
+    cmds = {c.unit_id(profile.id): c for c in load_compdb(profile.compile_commands)}
+    if lm.manifest is None or not lm.programs:
+        from weaver.link import Program as LinkProgram
+
+        progs = [LinkProgram("all", [], ["main"], closed=True, configured=False, units=list(cmds))]
+        rec["program_note"] = "no link manifest: all units analysed as one program"
+    else:
+        progs = lm.programs
+    wanted = {u for p in progs for u in p.units}
+    bitcode: dict[str, dict[str, Any]] = {}
+    for uid, c in cmds.items():
+        if uid in wanted:
+            bitcode[uid] = _unit_bitcode(project, profile, store, c, force)
+
+    # 2. one job per program ------------------------------------------------------
+    rec["programs"] = {}
+    for prog in progs:
+        pdir = out / "programs" / _safe(prog.name)
+        pr = _run_program(project, profile, svf, prog, [bitcode[u] for u in prog.units if u in bitcode], pdir)
+        rec["programs"][prog.name] = {
+            k: pr.get(k)
+            for k in ("status", "reason", "closed", "configured", "images", "units", "evidence_status", "duration_s")
+        }
+        if log:
+            log(f"[{profile.id}] flow {prog.name}: {pr['status']}" + (f" ({pr['reason']})" if pr.get("reason") else ""))
+    statuses = [p["status"] for p in rec["programs"].values()]
+    rec["status"] = (
+        "complete"
+        if statuses and all(st == "complete" for st in statuses)
+        else "failed"
+        if statuses and all(st == "failed" for st in statuses)
+        else "incomplete"
+    )
+    bad = [n for n, p in rec["programs"].items() if p["status"] != "complete"]
+    if bad:
+        rec["reason"] = f"{len(bad)} of {len(statuses)} program(s) not complete: {', '.join(bad[:8])}"
+    rec["duration_s"] = round(time.time() - started, 2)
+    write_json(out / "run.json", rec)
+    return rec
+
+
+def _safe(name: str) -> str:
+    return re.sub(r"[^A-Za-z0-9_.+-]", "_", name)
+
+
+def _unit_bitcode(project: Project, profile: Profile, store: Store, c: Any, force: bool) -> dict[str, Any]:
+    udir = store.unit_dir(profile.id, c.unit_id(profile.id))
+    mpath = udir / MANIFEST
+    rel = rel_or_abs(c.file, project.root)
+    if not mpath.exists():
+        return {"missing": True, "unit": c.unit_id(profile.id), "file": rel, "reason": "not collected"}
+    m = read_json(mpath)
+    san = sanitize(c)
+    if m["production_tool"]["family"] == "clang":
+        cc, opts, tool, status = c.compiler, san.options, identify(c.compiler, c.directory), "native"
+    elif m.get("secondary_tool") and (m.get("translation") or {}).get("options"):
+        cc = m["secondary_tool"]["path"]
+        opts, tool, status = m["translation"]["options"], identify(cc), m.get("ast_evidence_status")
+    else:
+        return {"missing": True, "unit": m["unit_id"], "file": m["file_rel"], "reason": "no Clang frontend"}
+    key = short_hash(m["cache_key"], "flow_bitcode", 1)
+    art = m.get("flow_bitcode")
+    bc = udir / "flow.flow.bc"
+    if force or not art or art.get("key") != key or not bc.exists():
+        res = _run_recipe("flow_bitcode", cc, opts, san, udir, "flow", "flow", tool, _status(status))
+        art = {
+            "key": key,
+            "status": res["status"],
+            "returncode": res["returncode"],
+            "argv": res["argv"],
+            "tool": res["tool"],
+        }
+        m["flow_bitcode"] = art
+        write_json(mpath, m)
+    if art["status"] != "ok":
+        return {
+            "missing": True,
+            "unit": m["unit_id"],
+            "file": m["file_rel"],
+            "reason": f"bitcode failed (exit {art['returncode']})",
+        }
+    return {
+        "unit": m["unit_id"],
+        "file": m["file_rel"],
+        "file_sha256": m["file_sha256"],
+        "bitcode": str(bc),
+        "sha256": sha256_file(bc),
+        "evidence_status": status,
+        "directory": m["directory"],
+        "producer": [tool.realpath or tool.requested, tool.version],
+    }
+
+
+def _run_program(
+    project: Project, profile: Profile, svf: dict[str, Any], prog: Any, units: list[dict[str, Any]], out: Path
+) -> dict[str, Any]:
+    out.mkdir(parents=True, exist_ok=True)
+    started = time.time()
+    rec: dict[str, Any] = {
+        "schema": FLOW_SCHEMA,
+        "profile": profile.id,
+        "program": prog.name,
+        "images": prog.images,
+        "entry_points": prog.entry_points,
+        "closed": prog.closed,
+        "configured": prog.configured,
+        "started_at": now_iso(),
+        "svf": {k: v for k, v in svf.items() if k not in ("env",)},
+    }
+    rec["svf"]["wpa_sha256"] = sha256_file(svf["wpa"])
+    inputs = [u for u in units if not u.get("missing")]
+    missing = [{k: u[k] for k in ("unit", "file", "reason")} for u in units if u.get("missing")]
     rec["inputs"] = inputs
-    rec["missing_units"] = missing
-    if not inputs:
-        rec.update(status="failed", reason="no bitcode could be produced")
+    rec["units"] = len(units)
+
+    def done(status: str, reason: str | None = None) -> dict[str, Any]:
+        rec["status"] = status
+        if reason:
+            rec["reason"] = reason
+        rec["missing_units"] = missing
+        rec["evidence_status"] = _weakest([i["evidence_status"] for i in inputs]) if inputs else "unsupported"
+        rec["duration_s"] = round(time.time() - started, 2)
         write_json(out / "run.json", rec)
         return rec
 
-    # 2. link with the producer's llvm-link ------------------------------------
+    if not inputs:
+        return done("failed", "no bitcode could be produced")
+    files = [i["file"] for i in inputs]
+    dup = sorted({f for f in files if files.count(f) > 1})
+    if dup:
+        return done("failed", f"the program compiles {dup[:3]} more than once; analyse its images separately")
+    producers = {tuple(i["producer"]) for i in inputs}
     if len(producers) != 1:
-        rec.update(status="failed", reason=f"units were produced by different Clang builds: {sorted(producers)}")
-        write_json(out / "run.json", rec)
-        return rec
+        return done("failed", f"units were produced by different Clang builds: {sorted(producers)}")
     ((clang_path, clang_ver),) = producers
     link = _llvm_link_for(clang_path, clang_ver)
     if link is None:
-        rec.update(status="failed", reason=f"no llvm-link matching Clang {clang_ver}")
-        write_json(out / "run.json", rec)
-        return rec
+        return done("failed", f"no llvm-link matching Clang {clang_ver}")
     program = out / "program.bc"
     lr = run([link, "-o", str(program), *[i["bitcode"] for i in inputs]], timeout=1800)
     rec["link"] = {"tool": link, "returncode": lr.returncode, "stderr": lr.stderr_text(4000)}
     if not lr.ok:
-        rec.update(status="failed", reason="llvm-link failed")
-        write_json(out / "run.json", rec)
-        return rec
+        return done(
+            "failed",
+            "llvm-link failed: " + lr.stderr_text(300).strip().splitlines()[0]
+            if lr.stderr_text()
+            else "llvm-link failed",
+        )
     if re.search(r"different (target triples|data ?layouts)", lr.stderr_text(), re.I):
-        rec.update(status="failed", reason="modules have different targets or data layouts; not linked as one program")
-        write_json(out / "run.json", rec)
-        return rec
-    rec["program"] = {"path": str(program), "sha256": sha256_file(program)}
+        return done("failed", "modules have different targets or data layouts; not linked as one program")
+    rec["program_bc"] = {"path": str(program), "sha256": sha256_file(program)}
 
-    # 3. SVF job under limits ------------------------------------------------
     argv = [svf["wpa"], *project.flow.options, *PRINT_OPTIONS, str(program)]
     stdout_path = out / "wpa.out"
     t0 = time.time()
@@ -265,41 +337,46 @@ def run_flow(project: Project, profile: Profile, force: bool = False) -> dict[st
         "duration_s": round(time.time() - t0, 2),
         "memory_mb": project.flow.memory_mb,
         "timeout_s": project.flow.timeout,
+        "stderr_tail": (out / "wpa.err").read_text(errors="replace")[-4000:],
     }
-    err = (out / "wpa.err").read_text(errors="replace")[-4000:]
-    rec["job"]["stderr_tail"] = err
     if rc != 0 or timed_out:
-        rec.update(
-            status="incomplete", reason="SVF did not complete" + (" (timeout)" if timed_out else f" (exit {rc})")
-        )
-        write_json(out / "run.json", rec)
-        return rec
+        return done("incomplete", "SVF did not complete" + (" (timeout)" if timed_out else f" (exit {rc})"))
 
-    # 4. parse into Weaver's schema -----------------------------------------------
     from weaver.flow.parse import parse_wpa
 
     dirs = sorted({i["directory"] for i in inputs})
-    flow = parse_wpa(stdout_path.read_text(errors="replace"), project.root, dirs)
-    flow.update(schema=FLOW_SCHEMA, profile=profile.id, generated_at=now_iso())
+    known: set[str] = set()
+    store = Store(project.state_dir)
+    for i in inputs:
+        known.add(i["file"])
+        mpath = store.unit_dir(profile.id, i["unit"]) / MANIFEST
+        if mpath.exists():
+            for d in read_json(mpath).get("dependencies", []):
+                path = d.get("path") if isinstance(d, dict) else d
+                if path and is_within(path, project.root):
+                    known.add(rel_or_abs(path, project.root))
+    flow = parse_wpa(stdout_path.read_text(errors="replace"), project.root, dirs, known)
+    flow.update(schema=FLOW_SCHEMA, profile=profile.id, program=prog.name, generated_at=now_iso())
     diag = flow.pop("diagnostics")
     rec["diagnostics"] = diag
-    complete = not missing and diag["parse_errors"] == 0 and not diag["time_limit_hit"]
-    rec["status"] = "complete" if complete else "incomplete"
-    if not complete:
-        reasons = []
-        if missing:
-            reasons.append(f"{len(missing)} unit(s) missing from the analysed program")
-        if diag["parse_errors"]:
-            reasons.append(f"{diag['parse_errors']} unparsed output line(s)")
-        if diag["time_limit_hit"]:
-            reasons.append("an analysis time limit was reached")
-        rec["reason"] = "; ".join(reasons)
-    rec["evidence_status"] = _weakest([i["evidence_status"] for i in inputs])
-    rec["duration_s"] = round(time.time() - started, 2)
-    flow["run"] = {k: rec[k] for k in ("status", "evidence_status", "inputs", "missing_units") if k in rec}
+    reasons = []
+    if missing:
+        reasons.append(f"{len(missing)} unit(s) missing from the analysed program")
+    if diag["parse_errors"]:
+        reasons.append(f"{diag['parse_errors']} unparsed output line(s)")
+    if diag["time_limit_hit"]:
+        reasons.append("an analysis time limit was reached")
+    if not prog.closed:
+        reasons.append("open program: code outside it may call its exported functions")
+    status = (
+        "complete"
+        if not reasons or reasons == ["open program: code outside it may call its exported functions"]
+        else "incomplete"
+    )
+    res = done(status, "; ".join(reasons) if reasons else None)
+    flow["run"] = {k: res[k] for k in ("status", "evidence_status", "inputs", "missing_units", "closed") if k in res}
     write_json(out / "flow.json", flow)
-    write_json(out / "run.json", rec)
-    return rec
+    return res
 
 
 def _status(s: str | None):
@@ -318,15 +395,28 @@ def _weakest(statuses: list[str | None]) -> str:
     return min(vals, key=lambda s: EVIDENCE_RANK[s]).value if vals else EvidenceStatus.UNSUPPORTED.value
 
 
-def resolve_source_file(name: str, root: Path, dirs: list[str], cache: dict[str, str | None]) -> str | None:
-    """Map a debug-info file name to a project-relative path (None when outside or ambiguous)."""
+def resolve_source_file(
+    name: str, root: Path, dirs: list[str], cache: dict[str, str | None], known: set[str] | None = None
+) -> str | None:
+    """Map a debug-info file name to a project-relative path (None when outside or ambiguous).
+
+    Debug info records names as the compiler saw them, often relative to a
+    directory that is not recorded in SVF's output.  Relative names are tried
+    against the compile directories and the project root, then matched by
+    path suffix against the program's own sources and headers (``known``).
+    """
     if name in cache:
         return cache[name]
-    cands = [name] if os.path.isabs(name) else [os.path.join(d, name) for d in dirs]
+    cands = [name] if os.path.isabs(name) else [os.path.join(d, name) for d in [*dirs, str(root)]]
     found = {os.path.realpath(c) for c in cands if os.path.exists(c)}
     out = None
     if len(found) == 1:
         f = found.pop()
         out = rel_or_abs(f, root) if is_within(f, root) else f
+    elif not found and known and not os.path.isabs(name):
+        norm = os.path.normpath(name).lstrip("./")
+        hits = [k for k in known if k == norm or k.endswith("/" + norm)]
+        if len(hits) == 1:
+            out = hits[0]
     cache[name] = out
     return out

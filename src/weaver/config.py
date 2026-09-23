@@ -84,6 +84,9 @@ class CaptureSpec:
     command: CommandSpec
     tools: dict[str, str] = field(default_factory=lambda: {"cc": "cc"})
     clean: CommandSpec | None = None
+    # fnmatch patterns (relative to the project root, or absolute) for compiled sources that are not
+    # part of the program, e.g. generated test harnesses; build-system probes are always excluded.
+    exclude: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -137,6 +140,8 @@ class Project:
     raw: dict[str, Any]
     flow: FlowConfig = field(default_factory=FlowConfig)
     contracts_path: Path | None = None
+    # Images that run together (see weaver.link): [{name, images, entry_points, closed, profile}]
+    programs: list[dict[str, Any]] = field(default_factory=list)
 
     def profile(self, pid: str) -> Profile:
         for p in self.profiles:
@@ -159,6 +164,16 @@ def find_config(start: str | os.PathLike[str] | None = None) -> Path:
         if cand.exists():
             return cand
     raise ConfigError(f"no {CONFIG_NAME} found in {cur} or its parents (run 'weaver init')")
+
+
+def _model_path(base: Path, ref: str) -> Path:
+    """A reviewed effect-model file: ``builtin:<name>`` ships with Weaver, anything else is a path."""
+    if ref.startswith("builtin:"):
+        p = Path(__file__).resolve().parent / "data" / "models" / f"{ref.removeprefix('builtin:')}.yaml"
+        if not p.exists():
+            raise ConfigError(f"no built-in effect models named {ref!r}")
+        return p
+    return (base / ref).resolve()
 
 
 def load_project(path: str | os.PathLike[str] | None = None) -> Project:
@@ -212,6 +227,7 @@ def load_project(path: str | os.PathLike[str] | None = None) -> Project:
             capture = CaptureSpec(
                 command=cmd,
                 clean=clean,
+                exclude=[str(x) for x in ((cap.get("exclude") if isinstance(cap, dict) else None) or [])],
                 tools={
                     str(k): str(v)
                     for k, v in ((cap.get("tools") if isinstance(cap, dict) else None) or {"cc": "cc"}).items()
@@ -245,7 +261,7 @@ def load_project(path: str | os.PathLike[str] | None = None) -> Project:
         timeout=float(svf.get("timeout", 900.0)),
         memory_mb=int(svf.get("memory_mb", 8192)),
         options=[str(o) for o in svf.get("options", ["-ander", "-field-limit=0"])],
-        model_files=[(base / m).resolve() for m in fl.get("models", [])],
+        model_files=[_model_path(base, str(m)) for m in fl.get("models", [])],
         externals=dict(fl.get("externals") or {}),
     )
     return Project(
@@ -261,7 +277,28 @@ def load_project(path: str | os.PathLike[str] | None = None) -> Project:
         clite=dict(raw.get("clite") or {}),
         acceptance=acceptance,
         raw=raw,
+        programs=_programs(raw.get("programs") or []),
     )
+
+
+def _programs(raw: Any) -> list[dict[str, Any]]:
+    if not isinstance(raw, list):
+        raise ConfigError("'programs' must be a list of {name, images, entry_points}")
+    out = []
+    for i, p in enumerate(raw):
+        if not isinstance(p, dict) or not p.get("name") or not isinstance(p.get("images"), list):
+            raise ConfigError(f"programs[{i}] needs a 'name' and a list of 'images'")
+        out.append(
+            {
+                "name": str(p["name"]),
+                "images": [str(x) for x in p["images"]],
+                "entry_points": [str(x) for x in p.get("entry_points") or []],
+                "closed": bool(p.get("closed", True)),
+                "profile": str(p["profile"]) if p.get("profile") else None,
+                "notes": str(p.get("notes", "")),
+            }
+        )
+    return out
 
 
 TEMPLATE = """\

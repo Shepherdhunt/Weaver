@@ -150,6 +150,23 @@ class RecipeContext:
             self._lex[rel] = lex(Path(self.abs(rel)).read_bytes())
         return self._lex[rel]
 
+    def ident_occurrences(self, name: str, files: list[str]) -> list[tuple[str, int]]:
+        """(file, token index) of every identifier token ``name`` in ``files`` (index built once per file)."""
+        if not hasattr(self, "_ident_index"):
+            self._ident_index: dict[str, dict[str, list[int]]] = {}
+        out: list[tuple[str, int]] = []
+        for rel in files:
+            idx = self._ident_index.get(rel)
+            if idx is None:
+                idx = {}
+                if os.path.exists(self.abs(rel)):
+                    for i, t in enumerate(self.lexed(rel).tokens):
+                        if t.kind == "ident":
+                            idx.setdefault(t.text, []).append(i)
+                self._ident_index[rel] = idx
+            out.extend((rel, i) for i in idx.get(name, []))
+        return out
+
     def current_hash(self, rel: str) -> str:
         return sha256_file(self.abs(rel))
 
@@ -163,25 +180,75 @@ class RecipeContext:
             from weaver.flow.models import load_models
             from weaver.flow.program import Program
 
-            self._program = Program(self.inventory, load_models(self.project))
+            unit_programs: dict[str, set[str]] = {}
+            for u in self.inventory["units"]:
+                try:
+                    progs = self.link(u["profile"]).programs_of_unit(u["unit_id"])
+                except Exception:  # noqa: BLE001 - no link model: resolve by name only
+                    progs = []
+                unit_programs[u["unit_id"]] = {f"{u['profile']}/{p.name}" for p in progs}
+            self._program = Program(self.inventory, load_models(self.project), unit_programs)
         return self._program
 
-    def flow(self, profile_id: str) -> Any:
+    def link(self, profile_id: str) -> Any:
+        """The profile's link model (images, programs, exports); see ``weaver.link``."""
+        if not hasattr(self, "_links"):
+            self._links: dict[str, Any] = {}
+        if profile_id not in self._links:
+            from weaver.link import link_model
+
+            self._links[profile_id] = link_model(self.project, self.project.profile(profile_id))
+        return self._links[profile_id]
+
+    def flows(self, profile_id: str) -> dict[str, Any]:
+        """Program name -> current flow evidence (None when absent or stale) for one profile."""
         if not hasattr(self, "_flows"):
             self._flows: dict[str, Any] = {}
         if profile_id not in self._flows:
-            from weaver.flow.evidence import load_flow
+            from weaver.flow.evidence import load_flows
 
-            self._flows[profile_id] = load_flow(self.project, profile_id, self.inventory)
+            self._flows[profile_id] = load_flows(self.project, profile_id, self.inventory)
         return self._flows[profile_id]
 
-    def whole_program(self) -> list[tuple[str, str]]:
-        """Problems preventing a whole-program claim: (status, message) pairs."""
+    def programs_for_units(self, units: list[str]) -> dict[str, list[str]]:
+        """``profile/program`` keys of the programs that link any of ``units``, with their unit ids."""
+        out: dict[str, list[str]] = {}
+        by_id = {u["unit_id"]: u for u in self.inventory["units"]}
+        for uid in units:
+            u = by_id.get(uid)
+            if u is None:
+                continue
+            for prog in self.link(u["profile"]).programs_of_unit(uid):
+                out.setdefault(f"{u['profile']}/{prog.name}", prog.units)
+        return out
+
+    def flows_for_units(self, units: list[str]) -> dict[str, Any]:
+        """Flow evidence of every program that links any of ``units`` (None where missing)."""
+        from weaver.flow.svf import _safe
+
+        out: dict[str, Any] = {}
+        for key in self.programs_for_units(units):
+            profile, _, name = key.partition("/")
+            flows = self.flows(profile)
+            out[key] = flows.get(_safe(name))
+        return out
+
+    def whole_program(self, units: list[str] | None = None) -> list[tuple[str, str]]:
+        """Problems preventing a whole-program claim: (status, message) pairs.
+
+        With ``units``, only the programs that link those units must be fully
+        analysed; otherwise every unit of every profile.
+        """
         from weaver.capture.compdb import load_compdb
         from weaver.errors import WeaverError
 
         out: list[tuple[str, str]] = []
         analysed = {(u["profile"], u["unit_id"]): u for u in self.inventory["units"]}
+        scope: set[str] | None = None
+        if units is not None:
+            progs = self.programs_for_units(units)
+            if progs:
+                scope = {u for us in progs.values() for u in us}
         for p in self.project.profiles:
             try:
                 cmds = load_compdb(p.compile_commands)
@@ -189,6 +256,8 @@ class RecipeContext:
                 out.append((UNRESOLVED, f"profile {p.id}: {e}"))
                 continue
             for c in cmds:
+                if scope is not None and c.unit_id(p.id) not in scope:
+                    continue
                 u = analysed.get((p.id, c.unit_id(p.id)))
                 rel = os.path.relpath(c.file, self.root)
                 if u is None:

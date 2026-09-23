@@ -40,7 +40,7 @@ from weaver.recipes.base import (
     RecipeResult,
 )
 from weaver.rewrite import Edit, OffsetMap
-from weaver.util import read_json, rel_or_abs
+from weaver.util import rel_or_abs
 
 SCALAR_WORDS = {
     "char",
@@ -217,10 +217,15 @@ class ScalarInputRecipe(Recipe):
         if P["current"].status == ESTABLISHED:
             pos("current", f"{len(files)} affected file(s) match the analysed revision")
 
-        for status, msg in ctx.whole_program():
+        progs = ctx.programs_for_units(list(fsum.get("units", [])))
+        for status, msg in ctx.whole_program(list(fsum.get("units", []))):
             P["program"].fail(status, msg, "collect every unit and run 'weaver inventory' (and fidelity checks)")
         if P["program"].status == ESTABLISHED:
-            pos("program", f"all {len(inv['units'])} unit(s) of {len(ctx.project.profiles)} profile(s) analysed")
+            if progs:
+                n = len({u for us in progs.values() for u in us})
+                pos("program", f"all {n} unit(s) of program(s) {', '.join(sorted(progs))} analysed")
+            else:
+                pos("program", f"all {len(inv['units'])} unit(s) of {len(ctx.project.profiles)} profile(s) analysed")
 
         # -- parameter type -------------------------------------------------------
         pt = resolve_typedefs(safe_parse(finding.get("canonical_type") or finding.get("type")), {})
@@ -284,8 +289,11 @@ class ScalarInputRecipe(Recipe):
                 )
 
         # -- may-modify (flow) --------------------------------------------------
-        profiles = sorted({u["profile"] for u in defining_units})
-        flows = {p: ctx.flow(p) for p in profiles}
+        flows = ctx.flows_for_units(list(fsum.get("units", [])))
+        if not flows:  # linked into no known program: fall back to each profile's only program
+            from weaver.flow.evidence import load_flow
+
+            flows = {p: load_flow(ctx.project, p, inv) for p in sorted({u["profile"] for u in defining_units})}
         arg_designators: list[dict[str, Any]] | None = []
         for _, c in callers:
             a = c["args"][idx] if idx < len(c["args"]) else None
@@ -436,17 +444,14 @@ class ScalarInputRecipe(Recipe):
         if fsum["static"]:
             scan = [fsum["file"]]
         unexplained = []
-        for rel in scan:
-            if not os.path.exists(ctx.abs(rel)):
+        for rel, i in ctx.ident_occurrences(fname, scan):
+            toks = ctx.lexed(rel).tokens
+            t = toks[i]
+            if t.start in explained.get(rel, set()):
                 continue
-            lx = ctx.lexed(rel)
-            toks = lx.tokens
-            for i, t in enumerate(toks):
-                if t.kind != "ident" or t.text != fname or t.start in explained.get(rel, set()):
-                    continue
-                if i > 0 and toks[i - 1].text in (".", "->"):
-                    continue
-                unexplained.append(f"{rel}:{t.line}" + (f" (#{t.directive})" if t.directive else ""))
+            if i > 0 and toks[i - 1].text in (".", "->"):
+                continue
+            unexplained.append(f"{rel}:{t.line}" + (f" (#{t.directive})" if t.directive else ""))
         if unexplained:
             pre.fail(
                 VIOLATED,
@@ -457,9 +462,8 @@ class ScalarInputRecipe(Recipe):
         for rel in self._asm_files(ctx):
             if fname in ctx.lexed(rel).text:
                 pre.fail(UNRESOLVED, f"assembly file {rel} mentions {fname}")
-        if not fsum["static"]:
-            for status, msg in self._link_problems(ctx):
-                pre.fail(status, msg, "link only analysed objects, or confirm the library cannot call this function")
+        for status, msg in self._link_problems(ctx, fname, list(fsum.get("units", [])), bool(fsum["static"])):
+            pre.fail(status, msg, "link only analysed objects, or declare the program and its entry points")
         if pre.status == ESTABLISHED:
             pos(
                 "callers",
@@ -469,42 +473,29 @@ class ScalarInputRecipe(Recipe):
 
     @staticmethod
     def _asm_files(ctx: RecipeContext) -> list[str]:
+        cached = getattr(ctx, "_asm_cache", None)
+        if cached is not None:
+            return cached
         out = []
         for dirpath, dirnames, filenames in os.walk(ctx.root):
             dirnames[:] = [d for d in dirnames if not d.startswith(".")]
             for fn in filenames:
                 if os.path.splitext(fn)[1] in (".s", ".S", ".asm"):
                     out.append(rel_or_abs(os.path.join(dirpath, fn), ctx.root))
+        ctx._asm_cache = out  # type: ignore[attr-defined]
         return out
 
     @staticmethod
-    def _link_problems(ctx: RecipeContext) -> list[tuple[str, str]]:
-        from weaver.capture.compdb import load_compdb
-
+    def _link_problems(ctx: RecipeContext, fname: str, units: list[str], static: bool) -> list[tuple[str, str]]:
+        """Callers outside the analysed code, from each profile's link model (see ``weaver.link``)."""
         out: list[tuple[str, str]] = []
-        for p in ctx.project.profiles:
-            manifest = p.link_manifest or p.compile_commands.parent / "links.json"
-            if not manifest.exists():
-                out.append(
-                    (UNRESOLVED, f"profile {p.id}: no link manifest; cannot confirm only analysed objects are linked")
-                )
-                continue
-            outputs = set()
-            for c in load_compdb(p.compile_commands):
-                if c.output:
-                    outputs.add(os.path.realpath(os.path.join(c.directory, c.output)))
-            for link in read_json(manifest):
-                for inp in link.get("inputs", []):
-                    path = os.path.realpath(os.path.join(link["cwd"], inp))
-                    if path not in outputs:
-                        out.append(
-                            (UNRESOLVED, f"profile {p.id}: linked input {inp} was not produced by an analysed unit")
-                        )
-                for a in link.get("argv", []):
-                    if a.startswith("-l") and len(a) > 2:
-                        out.append(
-                            (UNRESOLVED, f"profile {p.id}: library {a} is linked; it may call the function by name")
-                        )
+        by_profile: dict[str, list[str]] = {}
+        for u in ctx.inventory["units"]:
+            if u["unit_id"] in units:
+                by_profile.setdefault(u["profile"], []).append(u["unit_id"])
+        for pid, us in by_profile.items():
+            for status, msg in ctx.link(pid).external_callers(fname, us, static):
+                out.append((VIOLATED if status == "violated" else UNRESOLVED, f"profile {pid}: {msg}"))
         return out
 
     @staticmethod

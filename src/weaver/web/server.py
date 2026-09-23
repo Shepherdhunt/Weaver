@@ -250,9 +250,19 @@ def route(app: App, method: str, path: str, q: dict[str, str], body: dict[str, A
             body.get("concurrency"),
             body.get("name"),
             body.get("run"),
+            [t for t in body.get("tests") or [] if str(t).strip()],
         )
         app.open(str(cfg))
         return {"ok": True, "config": str(cfg)}
+    if (method, head) == ("GET", "detect-tests"):
+        from pathlib import Path
+
+        from weaver.testdetect import detect_tests
+
+        root = Path(q.get("path", "")).expanduser()
+        if not root.is_dir():
+            raise FileNotFoundError(f"{root} is not a directory")
+        return detect_tests(root.resolve(), (q.get("build") or "").replace("{cc}", q.get("cc") or "cc") or None)
     if head == "jobs" and method == "GET":
         if len(parts) == 1:
             return [j.to_json(len(j.log)) for j in sorted(app.jobs.values(), key=lambda j: -j.started)][:20]
@@ -283,6 +293,17 @@ def route(app: App, method: str, path: str, q: dict[str, str], body: dict[str, A
             return out
 
         return app.start("flow", "Points-to analysis (SVF)", work_flow).to_json()
+    if (method, head) == ("GET", "settings"):
+        from weaver.settings import read_settings
+
+        return read_settings(proj)
+    if (method, head) == ("POST", "settings"):
+        from weaver.settings import read_settings, write_settings
+
+        new, warnings = app.exclusive(lambda: write_settings(proj, body))
+        app.project = new
+        app.cache = api.Cache()
+        return {"ok": True, "warnings": warnings, "settings": read_settings(new)}
     if (method, head) == ("GET", "pointers"):
         return api.pointer_list(proj, app.cache)
     if (method, head) == ("GET", "pointer"):
@@ -300,7 +321,13 @@ def route(app: App, method: str, path: str, q: dict[str, str], body: dict[str, A
         if len(parts) > 1:
             t = Ledger(proj).load(parts[1])
             return {**t, "card": render_card(t)}
-        return [{k: t.get(k) for k in ("id", "state", "recipe", "finding_id", "finding", "created_at")} for t in txns]
+        return [
+            {
+                **{k: t.get(k) for k in ("id", "state", "recipe", "finding_id", "finding", "created_at")},
+                "strength": (t.get("acceptance") or {}).get("strength") or (t.get("validation") or {}).get("strength"),
+            }
+            for t in txns
+        ]
     if (method, head) == ("POST", "propose"):
         from weaver.card import render_card
 

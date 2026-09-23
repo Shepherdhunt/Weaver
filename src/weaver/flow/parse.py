@@ -29,6 +29,11 @@ _TARGET = re.compile(r"^!!Target NodeID (?P<id>\d+)\s+\[(?P<desc>.*)\]\s*$")
 _TDESC = re.compile(r"^<(?P<name>[^>]*)>\s*Source Loc:\s*(?P<loc>.*)$")
 _DUMMY = re.compile(r"^Dummy Obj id: ?(?P<id>\d+)")
 _ARG = re.compile(r"(?P<n>\d+)(?:st|nd|rd|th) arg (?P<fn>\S+)")
+_ARTIFICIAL = re.compile(
+    r"^(retval|tmp|agg\.tmp|ref\.tmp|\.compoundliteral|coerce|saved_stack|cleanup\.dest\.slot|__vla_expr|"
+    r"indirect-arg-temp|byval-temp|atomic-temp)(\.?\d+)?$"
+)
+_IDENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _CALLSITE = re.compile(r"^CallSite: CallICFGNode\d+ \{fun: (?P<fn>[^{]+?)\{(?P<loc>[^}]*)\}\}\s*$")
 
 
@@ -67,7 +72,7 @@ def parse_loc(text: str | None) -> dict[str, Any]:
     return out
 
 
-def parse_wpa(text: str, root: Path, dirs: list[str]) -> dict[str, Any]:
+def parse_wpa(text: str, root: Path, dirs: list[str], known: set[str] | None = None) -> dict[str, Any]:
     from weaver.flow.svf import resolve_source_file
 
     cache: dict[str, str | None] = {}
@@ -78,7 +83,7 @@ def parse_wpa(text: str, root: Path, dirs: list[str]) -> dict[str, Any]:
 
     def place(loc: dict[str, Any]) -> dict[str, Any]:
         f = loc.get("file_raw")
-        loc["file"] = resolve_source_file(f, root, dirs, cache) if f else None
+        loc["file"] = resolve_source_file(f, root, dirs, cache, known) if f else None
         loc.pop("raw", None)
         return loc
 
@@ -170,6 +175,15 @@ def parse_wpa(text: str, root: Path, dirs: list[str]) -> dict[str, Any]:
         i += 1
 
     for o in objects.values():
+        if o["kind"] is None and o["loc"].get("kind") == "none" and o.get("name"):
+            # No source location: a compiler-generated stack slot (the return-value slot, an
+            # aggregate or compound-literal temporary) or a declaration without a body (an
+            # external function or intrinsic).  Neither is unknown memory.
+            if _ARTIFICIAL.match(o["name"]):
+                o["kind"] = "stack"
+                o["artificial"] = True
+            elif o["name"].startswith("llvm.") or _IDENT.match(o["name"]):
+                o["kind"] = "external"
         if o["kind"] is None:
             k = o["loc"].get("kind")
             o["kind"] = {

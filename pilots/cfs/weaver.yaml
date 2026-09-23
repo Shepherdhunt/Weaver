@@ -1,0 +1,61 @@
+# Weaver pilot on NASA cFS v7.0.1 (see pilots/cfs/README.md).
+# Installed at the top of the cFS checkout by pilots/cfs/setup.sh.
+schema: weaver.project/1
+
+project:
+  name: cfs-pilot
+  root: .
+  # Validation workspaces copy the source tree; build trees and the ground system stay behind.
+  # Generated headers in build-weaver/ are still read from the original tree.
+  workspace_exclude: [.git, build-weaver, build-val, cFS-GroundSystem]
+
+preservation:
+  behaviors: [outputs, persistent-state, side-effect-ordering, event-messages, telemetry]
+  # cFS apps each run in their own OSAL task and share data through the software bus and
+  # tables; no project-wide single-threaded claim is made.  See pilots/cfs/README.md.
+
+acceptance:
+  require: [compile, mechanical-recheck, testing]
+  min_evidence: secondary-checked
+
+flow:
+  models: [builtin:cfs]
+
+# What runs together in one address space.  The cFE ES loader (OS_ModuleLoad / OS_SymbolLookup)
+# resolves exactly the entry points in pilot_defs' startup script by name; nothing else is looked
+# up dynamically.  The host tools and the functional-test module (cfe_testcase.so) are separate.
+programs:
+  - name: cpu1
+    images: [core-cpu1, cfe_assert.so, sample_lib.so, sample_app.so]
+    entry_points: [main, CFE_Assert_LibInit, SAMPLE_LIB_Init, SAMPLE_APP_Main]
+
+profiles:
+  - id: native
+    description: "cFS native simulation, pilot mission (cpu1: cFE, OSAL, PSP, sample_app, sample_lib)"
+    compile_commands: .weaver/compdb/native/compile_commands.json
+    capture:
+      command: >-
+        rm -rf build-weaver &&
+        CC={cc} cmake -S cfe -B build-weaver -DMISSIONCONFIG=pilot -DSIMULATION=native
+        -DCMAKE_BUILD_TYPE=debug -DCFE_EDS_ENABLED=OFF -DENABLE_UNIT_TESTS=FALSE > /dev/null &&
+        make -C build-weaver -j4 mission-all
+      tools: {cc: gcc}
+    secondary_frontend: {compiler: clang}
+    target: {architecture: x86_64, abi: sysv, endianness: little}
+    platform: {runtime_mode: process, os: linux, osal: posix}
+    validation:
+      # Rebuild each workspace with unit tests enabled and run the whole CTest suite (cFE,
+      # OSAL and PSP coverage tests plus the sample app's).  Results are compared test by
+      # test: a test that passes on the unpatched tree must pass with the patch.  Some OSAL
+      # functional tests (queues, timers, sockets) depend on the host and may fail on both.
+      build:
+        run: >-
+          rm -rf build-val &&
+          CC=gcc cmake -S cfe -B build-val -DMISSIONCONFIG=pilot -DSIMULATION=native
+          -DCMAKE_BUILD_TYPE=debug -DCFE_EDS_ENABLED=OFF -DENABLE_UNIT_TESTS=TRUE > /dev/null &&
+          make -C build-val -j4 mission-all > /dev/null
+        timeout: 1800
+      tests:
+        - name: ctest
+          run: "ctest --test-dir build-val/native/default_cpu1 -j4 --timeout 120"
+          timeout: 1800

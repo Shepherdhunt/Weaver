@@ -8,6 +8,8 @@ files the CLI uses.
 from __future__ import annotations
 
 import os
+import re
+import shlex
 from pathlib import Path
 from typing import Any
 
@@ -71,6 +73,7 @@ def project_state(project: Project) -> dict[str, Any]:
     from weaver.flow.evidence import flow_status
     from weaver.flow.svf import find_wpa
     from weaver.ledger import Ledger
+    from weaver.validate import configured_strength
 
     store = Store(project.state_dir)
     inv = None
@@ -111,6 +114,7 @@ def project_state(project: Project) -> dict[str, Any]:
         "svf_available": bool(find_wpa(project)),
         "snapshots": list_snapshots(project),
         "transactions": counts,
+        "validation": configured_strength(project),
     }
 
 
@@ -423,6 +427,20 @@ def source_view(project: Project, rel: str, cache: Cache) -> dict[str, Any]:
     }
 
 
+def _test_name(cmd: str) -> str:
+    try:
+        words = shlex.split(cmd)
+    except ValueError:
+        words = cmd.split()
+    if not words:
+        return "test"
+    if words[0] in ("make", "sh", "bash", "ninja", "meson") and len(words) > 1:
+        base = f"{words[0]}-{Path(words[1]).name}"
+    else:
+        base = Path(words[0]).name
+    return re.sub(r"[^A-Za-z0-9_.-]+", "-", base).strip("-.")[:40] or "test"
+
+
 def setup_project(
     path: str,
     build: str,
@@ -432,13 +450,17 @@ def setup_project(
     concurrency: str | None,
     name: str | None,
     run: str | None = None,
+    tests: list[str] | None = None,
 ) -> Path:
     """Write a weaver.yaml whose profile rebuilds the project through capture shims.
 
-    With ``run`` (a command whose output characterises the program: a test
-    suite or the program itself), validation also rebuilds baseline and
-    candidate workspaces with the real compiler and compares that command's
-    output, and acceptance requires the comparison to pass.
+    With ``tests`` (the project's own test commands, e.g. ``make check`` or
+    ``ctest``; see :mod:`weaver.testdetect`), validation rebuilds baseline and
+    candidate workspaces with the real compiler and runs them in both; a test
+    that passes on the baseline and fails with the patch rejects the change,
+    and acceptance requires testing.  With ``run`` (a command whose output
+    characterises the program), the two trees' outputs must also be identical.
+    Without either, validation is compile-only, which the interface flags.
     """
     root = Path(path).expanduser().resolve()
     if not root.is_dir():
@@ -459,12 +481,19 @@ def setup_project(
     if secondary:
         profile["secondary_frontend"] = {"compiler": secondary}
     require = ["compile", "mechanical-recheck"]
-    if run:
-        profile["validation"] = {
-            "build": {"run": build.replace("{cc}", compiler), "cwd": "{workspace}"},
-            "compare": [{"name": "run", "run": run, "cwd": "{workspace}"}],
-        }
-        require.append("differential-testing")
+    if run or tests:
+        val: dict[str, Any] = {"build": {"run": build.replace("{cc}", compiler), "cwd": "{workspace}"}}
+        if tests:
+            names: list[str] = []
+            for t in tests:
+                n = _test_name(t)
+                names.append(n if n not in names else f"{n}-{len(names)}")
+            val["tests"] = [{"name": n, "run": t, "cwd": "{workspace}"} for n, t in zip(names, tests)]
+            require.append("testing")
+        if run:
+            val["compare"] = [{"name": "run", "run": run, "cwd": "{workspace}"}]
+            require.append("differential-testing")
+        profile["validation"] = val
     cfg = {
         "schema": "weaver.project/1",
         "project": {"name": name or root.name, "root": ".", "workspace_exclude": [".git"]},

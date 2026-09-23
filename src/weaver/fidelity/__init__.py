@@ -77,18 +77,61 @@ IDENTITY_PREFIXES = (
 )
 
 
-class _Idents:
-    def __init__(self) -> None:
-        self.cache: dict[str, set[str]] = {}
+CONDITIONAL_DIRECTIVES = {"if", "ifdef", "ifndef", "elif", "elifdef", "elifndef", "undef"}
 
-    def of(self, path: str) -> set[str]:
+
+class _Idents:
+    """Identifiers of project files, split by where they occur."""
+
+    def __init__(self) -> None:
+        self.cache: dict[str, tuple[set[str], set[str]]] = {}
+
+    def _load(self, path: str) -> tuple[set[str], set[str]]:
         if path not in self.cache:
+            code: set[str] = set()
+            cond: set[str] = set()
             try:
                 lx = lex(Path(path).read_bytes())
-                self.cache[path] = {t.text for t in lx.tokens if t.kind == "ident"}
             except OSError:
-                self.cache[path] = set()
+                self.cache[path] = (code, cond)
+                return self.cache[path]
+            for t in lx.tokens:
+                if t.kind != "ident":
+                    continue
+                (cond if t.directive in CONDITIONAL_DIRECTIVES else code).add(t.text)
+            self.cache[path] = (code, cond)
         return self.cache[path]
+
+    def of(self, path: str) -> set[str]:
+        """Identifiers used in code or macro definitions (their value can reach compiled code)."""
+        return self._load(path)[0]
+
+    def conditional(self, path: str) -> set[str]:
+        """Identifiers used in conditional directives (their effect is which lines are compiled)."""
+        return self._load(path)[1]
+
+
+def _tokens(defn: str | None) -> tuple[str, ...] | None:
+    """A macro definition as a token sequence, up to spacing and parameter names.
+
+    Neither changes what an invocation expands to: ``offsetof(TYPE, MEMBER)`` and
+    ``offsetof(t, d)`` with the same body modulo renaming are the same macro.
+    """
+    if defn is None:
+        return None
+    head = ""
+    body = defn
+    rename: dict[str, str] = {}
+    if defn.startswith("(fn)("):
+        close = defn.find(")", 4)
+        params = [x.strip() for x in defn[5:close].split(",") if x.strip()]
+        for i, prm in enumerate(params):
+            if prm == "...":
+                continue
+            rename[prm.removesuffix("...").strip()] = f"${i}"
+        head = f"(fn){len(params)}" + ("..." if params and params[-1].endswith("...") else "")
+        body = defn[close + 1 :]
+    return (head, *(rename.get(t.text, t.text) if t.kind == "ident" else t.text for t in lex(body).tokens))
 
 
 def _deps(unit_dir: Path, name: str, directory: str) -> list[str]:
@@ -133,8 +176,10 @@ def check_unit(project: Project, profile: Profile, m: dict[str, Any], idents: _I
     sec_deps = _deps(udir, "secondary.d", m["directory"])
     proj_files = [os.path.realpath(m["file"])] + [d for d in prod_deps if is_within(d, root)]
     visible: set[str] = set()
+    conditional: set[str] = set()
     for f in proj_files:
         visible |= idents.of(f)
+        conditional |= idents.conditional(f)
 
     # 1. translation log
     tr = m.get("translation") or {}
@@ -145,7 +190,7 @@ def check_unit(project: Project, profile: Profile, m: dict[str, Any], idents: _I
     # 2. macros
     pm, sm = read_macros(udir / "unit.macros.txt"), read_macros(udir / "secondary.macros.txt")
     wrappers = transparent_wrappers(pm, sm) if pm and sm else {}
-    diff_relevant, diff_other, forwarding = [], [], []
+    diff_relevant, diff_other, forwarding, spacing, conditional_only = [], [], [], [], []
     for name in sorted(set(pm) | set(sm)):
         a, b = pm.get(name), sm.get(name)
         if a == b:
@@ -155,8 +200,16 @@ def check_unit(project: Project, profile: Profile, m: dict[str, Any], idents: _I
             if name in visible:
                 forwarding.append(f"{name} -> {wrappers[name]}")
             continue
+        if _tokens(a) == _tokens(b):
+            if name in visible or name in conditional:
+                spacing.append(name)
+            continue
         if name in visible:
             diff_relevant.append(desc)
+        elif name in conditional:
+            # Only tested by #if/#ifdef in project files: its whole effect is which lines are
+            # compiled, and the active-code comparison below checks exactly that.
+            conditional_only.append(desc)
         elif not name.startswith(IDENTITY_PREFIXES):
             diff_other.append(desc)
     findings += [f"macro observable by project code differs: {d}" for d in diff_relevant]
@@ -165,9 +218,18 @@ def check_unit(project: Project, profile: Profile, m: dict[str, Any], idents: _I
             "secondary-only forwarding wrappers (every argument passed once, unchanged, to the fortified "
             f"variant of the same library function; arguments read as plain source text): {', '.join(forwarding)}"
         )
+    if spacing:
+        notes.append(f"macros that differ only in spacing or parameter names: {', '.join(spacing[:20])}")
+    if conditional_only:
+        notes.append(
+            f"{len(conditional_only)} differing macro(s) are only tested in conditional directives; "
+            "their effect is covered by the active-code comparison"
+        )
     rec["macro_differences"] = {
         "relevant": diff_relevant,
         "forwarding": forwarding,
+        "spacing_only": spacing,
+        "conditional_only": conditional_only,
         "not_referenced": diff_other[:200],
         "not_referenced_count": len(diff_other),
     }
@@ -237,11 +299,23 @@ def check_unit(project: Project, profile: Profile, m: dict[str, Any], idents: _I
     return rec
 
 
-def run_fidelity(project: Project, profile: Profile, layout: bool = True) -> dict[str, Any]:
+_WORKER_IDENTS: _Idents | None = None
+
+
+def _check_star(args: tuple[Project, Profile, dict[str, Any], bool]) -> dict[str, Any]:
+    global _WORKER_IDENTS
+    if _WORKER_IDENTS is None:
+        _WORKER_IDENTS = _Idents()
+    project, profile, m, layout = args
+    return check_unit(project, profile, m, _WORKER_IDENTS, layout)
+
+
+def run_fidelity(project: Project, profile: Profile, layout: bool = True, jobs: int | None = None) -> dict[str, Any]:
+    from concurrent.futures import ProcessPoolExecutor
+
     store = Store(project.state_dir)
     cmds = load_compdb(profile.compile_commands)
-    idents = _Idents()
-    units = []
+    work = []
     for c in cmds:
         p = store.unit_dir(profile.id, c.unit_id(profile.id)) / MANIFEST
         if not p.exists():
@@ -251,9 +325,15 @@ def run_fidelity(project: Project, profile: Profile, layout: bool = True) -> dic
             "artifacts", {}
         ):
             continue
-        rec = check_unit(project, profile, m, idents, layout)
-        write_json(store.fidelity_dir(profile.id) / f"{m['unit_id']}.json", rec)
-        units.append(rec)
+        work.append((project, profile, m, layout))
+    jobs = jobs or min(8, os.cpu_count() or 2)
+    if jobs > 1 and len(work) > 1:
+        with ProcessPoolExecutor(max_workers=jobs) as ex:
+            units = list(ex.map(_check_star, work, chunksize=4))
+    else:
+        units = [_check_star(w) for w in work]
+    for rec in units:
+        write_json(store.fidelity_dir(profile.id) / f"{rec['unit_id']}.json", rec)
     summary = {
         "profile": profile.id,
         "checked_at": now_iso(),

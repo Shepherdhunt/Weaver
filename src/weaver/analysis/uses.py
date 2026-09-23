@@ -193,6 +193,44 @@ def _object_designator(n: Node | None) -> dict[str, Any] | None:
     return {"kind": n.kind}
 
 
+def _sink(e: Node) -> dict[str, Any]:
+    """Where a pointer value derived from the tracked pointer goes (through casts and parens).
+
+    Used for casts and ``&p->f`` / ``&p[i]``: the derived value may be passed to a
+    call, copied, returned or dereferenced, which decides whether the original
+    target escapes or is written.
+    """
+    n, p = _up(e)
+    while p is not None and (
+        p.kind == "CStyleCastExpr" or (p.kind == "ImplicitCastExpr" and p.cast_kind not in ("LValueToRValue",))
+    ):
+        n, p = _up(p)
+    if p is None:
+        return {"kind": "other"}
+    k, op = p.kind, p.opcode
+    if k == "CallExpr":
+        if n.index == 0:
+            return {"kind": "indirect-call"}
+        return {"kind": "call-arg", "callee": _callee_name(p), "arg": n.index - 1}
+    if k == "ReturnStmt":
+        return {"kind": "return"}
+    if k == "VarDecl":
+        return {"kind": "copy", "into": {"target": "variable", "name": p.name, "decl": p.id}}
+    if k == "BinaryOperator" and op == "=" and n.index == 1:
+        return {"kind": "copy", "into": _describe_lhs(p.child(0))}
+    if k == "UnaryOperator" and op == "*":
+        return {"kind": "deref", "access": lvalue_access(p)}
+    if k == "MemberExpr" and p.raw.get("isArrow"):
+        return {"kind": "arrow", "access": lvalue_access(p), "field": p.name}
+    if k == "ArraySubscriptExpr":
+        return {"kind": "subscript", "access": lvalue_access(p)}
+    if k == "BinaryOperator" and op in COMPARE_OPS | LOGICAL_OPS:
+        return {"kind": "compare"}
+    if k == "InitListExpr":
+        return {"kind": "copy", "into": {"target": "aggregate-initializer"}}
+    return {"kind": "other", "parent": k}
+
+
 def _classify_value(ref: Node, rv: Node) -> Use:
     """The pointer's *value* is read (LValueToRValue); what happens to it?"""
     n, p = _up(rv)
@@ -202,9 +240,14 @@ def _classify_value(ref: Node, rv: Node) -> Use:
     if k == "UnaryOperator" and op == "*":
         return Use("deref", lvalue_access(p), ref, p)
     if k == "MemberExpr" and p.raw.get("isArrow"):
-        return Use("arrow", lvalue_access(p), ref, p, {"field": p.name})
+        acc = lvalue_access(p)
+        d: dict[str, Any] = {"field": p.name}
+        if acc == "address":
+            d["sink"] = _sink(_up(p)[1])
+        return Use("arrow", acc, ref, p, d)
     if k == "ArraySubscriptExpr":
-        return Use("subscript", lvalue_access(p), ref, p)
+        acc = lvalue_access(p)
+        return Use("subscript", acc, ref, p, {"sink": _sink(_up(p)[1])} if acc == "address" else {})
     if k == "UnaryOperator" and op == "!":
         return Use("null-test", None, ref, p)
     if k == "BinaryOperator" and op in LOGICAL_OPS:
@@ -239,7 +282,11 @@ def _classify_value(ref: Node, rv: Node) -> Use:
         return Use("copy", None, ref, p, {"into": {"target": "aggregate-initializer"}})
     if k in ("CStyleCastExpr",) or (k == "ImplicitCastExpr" and p.cast_kind not in ("LValueToRValue",)):
         return Use(
-            "cast", None, ref, p, {"cast_kind": p.cast_kind, "explicit": k == "CStyleCastExpr", "to": p.qual_type}
+            "cast",
+            None,
+            ref,
+            p,
+            {"cast_kind": p.cast_kind, "explicit": k == "CStyleCastExpr", "to": p.qual_type, "sink": _sink(p)},
         )
     if k == "UnaryExprOrTypeTraitExpr":
         return Use("unevaluated", None, ref, p)

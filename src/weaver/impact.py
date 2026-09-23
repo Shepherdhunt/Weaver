@@ -204,6 +204,8 @@ EXPECTATIONS = {
     "no-identity": "the pointer is never compared",
     "no-reassign": "the pointer is never reassigned",
     "not-null-tested": "the pointer is never null-tested",
+    "borrowed": "the target is only read and no copy of the pointer outlives the call chain "
+    "(followed into analysed callees and through reviewed models)",
 }
 
 
@@ -221,10 +223,11 @@ def pin_contract(project: Project, finding_id: str, expect: list[str], reason: s
     bad = [e for e in expect if e not in EXPECTATIONS]
     if bad:
         raise WeaverError(f"unknown expectation(s) {bad}; known: {', '.join(EXPECTATIONS)}")
-    f = find_finding(load_inventory(project), finding_id)
-    violations = _contract_violations({"expect": expect}, f)
-    if violations:
-        raise WeaverError("the pointer does not currently satisfy: " + "; ".join(violations))
+    inv = load_inventory(project)
+    f = find_finding(inv, finding_id)
+    violations, unknown = _contract_check({"expect": expect}, f, project, inv)
+    if violations or unknown:
+        raise WeaverError("the pointer does not currently satisfy the expectations: " + "; ".join(violations + unknown))
     contracts = load_contracts(project)
     c = {
         "id": "C-" + short_hash(f["id"], sorted(expect), length=8),
@@ -255,6 +258,27 @@ def access_class(f: dict[str, Any]) -> str:
     if not uses:
         return "unused"
     return "read-only"
+
+
+def _contract_check(
+    c: dict[str, Any], f: dict[str, Any], project: Project, inv: dict[str, Any], cache: dict[str, Any] | None = None
+) -> tuple[list[str], list[str]]:
+    """(violations, unresolved) of a contract on the current inventory."""
+    out = _contract_violations(c, f)
+    unknown: list[str] = []
+    if "borrowed" in c["expect"]:
+        from weaver.analysis.borrow import check_borrow
+
+        cache = cache if cache is not None else {}
+        if "program" not in cache:
+            from weaver.recipes import RecipeContext
+
+            cache["program"] = RecipeContext(project, inv).program
+        r = check_borrow(inv, cache["program"], f)
+        for x in r.reasons:
+            text = f"borrowed: {x.get('function')}() line {x.get('line')}: {x['text']}"
+            (out if x["status"] == "violated" else unknown).append(text)
+    return out, unknown
 
 
 def _contract_violations(c: dict[str, Any], f: dict[str, Any]) -> list[str]:
@@ -318,6 +342,7 @@ def check_contracts(project: Project, inv: dict[str, Any]) -> list[dict[str, Any
 
     results = []
     by_id = {f["id"]: f for f in inv["findings"]}
+    cache: dict[str, Any] = {}
     for c in load_contracts(project):
         f = by_id.get(c["finding"])
         if f is None:
@@ -331,14 +356,15 @@ def check_contracts(project: Project, inv: dict[str, Any]) -> list[dict[str, Any
                 }
             )
             continue
-        v = _contract_violations(c, f)
+        v, unk = _contract_check(c, f, project, inv, cache)
+        status = "violated" if v else "unknown" if unk else "held"
         results.append(
             {
                 "contract": c["id"],
-                "status": "violated" if v else "held",
-                "severity": HIGH if v else None,
+                "status": status,
+                "severity": HIGH if v else REVIEW if unk else None,
                 "text": f"{c['subject'].get('name')} in {c['subject'].get('function')}(): "
-                f"{', '.join(c['expect'])}" + (": " + "; ".join(v) if v else ""),
+                f"{', '.join(c['expect'])}" + (": " + "; ".join(v + unk) if v or unk else ""),
                 "finding": f["id"],
             }
         )
@@ -549,6 +575,12 @@ def _transaction_overlaps(project: Project, base: dict[str, Any], changed: dict[
         if t["state"] != "accepted":
             continue
         post = (t.get("acceptance") or {}).get("post_hashes", {})
+        strength = (t.get("acceptance") or {}).get("strength")
+        weak = (
+            "; it was accepted on compile and re-check evidence only, so no test has ever exercised it"
+            if strength == "compile-only"
+            else ""
+        )
         for rel, h in post.items():
             if rel not in changed:
                 continue
@@ -560,7 +592,8 @@ def _transaction_overlaps(project: Project, base: dict[str, Any], changed: dict[
                         "file": rel,
                         "severity": REVIEW,
                         "text": f"{rel} changed after {t['id']} and the snapshot does not contain its exact result; "
-                        "re-run its validation plan",
+                        "re-run its validation plan" + weak,
+                        "strength": strength,
                     }
                 )
                 continue
@@ -579,7 +612,8 @@ def _transaction_overlaps(project: Project, base: dict[str, Any], changed: dict[
                         "file": rel,
                         "severity": HIGH,
                         "text": f"lines edited by {t['id']} ({t['recipe']} on '{t['finding'].get('name')}') were "
-                        f"modified afterwards: " + ", ".join(f"{h['old'][0]}-{h['old'][1]}" for h in hit),
+                        f"modified afterwards: " + ", ".join(f"{h['old'][0]}-{h['old'][1]}" for h in hit) + weak,
+                        "strength": strength,
                     }
                 )
     return out
@@ -591,6 +625,8 @@ def _transaction_overlaps(project: Project, base: dict[str, Any], changed: dict[
 
 
 def impact(project: Project, since: str, revalidate: bool = False, log: Any = None) -> dict[str, Any]:
+    from weaver.validate import configured_strength
+
     base = load_snapshot(project, since)
     cur = load_inventory(project)
     stale = [f for f, h in cur["files"].items() if (project.root / f).exists() and sha256_file(project.root / f) != h]
@@ -600,6 +636,7 @@ def impact(project: Project, since: str, revalidate: bool = False, log: Any = No
     rep["base"] = base["meta"]
     rep["generated_at"] = now_iso()
     rep["stale_inventory"] = stale
+    rep["validation"] = configured_strength(project)
     if revalidate:
         rep["revalidation"] = revalidate_against(project, base["tree"], log=log)
     sev = (
@@ -625,7 +662,7 @@ def impact(project: Project, since: str, revalidate: bool = False, log: Any = No
 
 def revalidate_against(project: Project, tree: Path, log: Any = None) -> list[dict[str, Any]]:
     """Run each profile's build, tests and comparisons on the snapshot tree and on the current tree."""
-    from weaver.validate import _run_spec
+    from weaver.validate import _compare_tests, _run_spec, test_outcomes
 
     work = Store(project.state_dir).root / "impact" / "work"
     base_ws, cur_ws = work / "baseline", work / "current"
@@ -654,15 +691,21 @@ def revalidate_against(project: Project, tree: Path, log: Any = None) -> list[di
         for t in v.tests:
             if not ok["current"]:
                 continue
+            ra = _run_spec(t, base_ws, project) if ok["baseline"] else None
             rb = _run_spec(t, cur_ws, project)
-            records.append(
-                {
-                    "kind": "testing",
-                    "name": f"{prof.id}:{t.name}",
-                    "outcome": "passed" if rb.ok else "failed",
-                    "detail": f"exit {rb.returncode}",
-                }
-            )
+            per_a = test_outcomes(ra.stdout_text(None)) if ra is not None else {}
+            per_b = test_outcomes(rb.stdout_text(None))
+            rec: dict[str, Any] = {"kind": "testing", "name": f"{prof.id}:{t.name}"}
+            if per_a and per_b:
+                outcome, detail, extra = _compare_tests(per_a, per_b)
+                rec.update(outcome=outcome.value, detail=detail.replace("with the patch", "now"), **extra)
+            elif rb.ok:
+                rec.update(outcome="passed", detail="exit 0")
+            elif ra is not None and not ra.ok:
+                rec.update(outcome="not-evaluated", detail=f"exit {rb.returncode}; also fails on the snapshot")
+            else:
+                rec.update(outcome="failed", detail=f"exit {rb.returncode}; passes on the snapshot")
+            records.append(rec)
         for t in v.compare:
             if not (ok["current"] and ok["baseline"]):
                 continue
@@ -700,6 +743,11 @@ def render_report(rep: dict[str, Any]) -> str:
     ]
     if rep.get("stale_inventory"):
         lines.append(f"  WARNING: inventory is stale for {len(rep['stale_inventory'])} file(s); run 'weaver refresh'")
+    if (rep.get("validation") or {}).get("level") == "compile-only":
+        lines.append(
+            "  NOTE: no tests are configured, so this report rests on pointer facts and contracts only; "
+            "--revalidate can rebuild but cannot run anything"
+        )
     for rel, hunks in rep["changed_files"].items():
         lines.append(f"  changed {rel}: " + ", ".join(f"lines {h['new'][0]}-{h['new'][1]}" for h in hunks))
     order = sorted(rep["changes"], key=lambda c: -RANK[c["severity"]])
@@ -711,7 +759,9 @@ def render_report(rep: dict[str, Any]) -> str:
     for t in rep["transactions"]:
         lines.append(f"  [{t['severity'].upper():6}] {t['text']}")
     for c in rep["contracts"]:
-        mark = {"held": "ok", "violated": "VIOLATED", "subject-gone": "gone"}[c["status"]]
+        mark = {"held": "ok", "violated": "VIOLATED", "subject-gone": "gone", "unknown": "UNKNOWN"}.get(
+            c["status"], c["status"]
+        )
         lines.append(f"  contract {c['contract']}: {mark} — {c['text']}")
     for r in rep.get("revalidation", []):
         lines.append(f"  revalidation {r['name']}: {r['outcome']} ({r['detail']})")
