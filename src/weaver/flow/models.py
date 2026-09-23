@@ -30,6 +30,9 @@ class EffectModel:
     owns: list[str] = field(default_factory=list)
     # Pointer arguments the function keeps after returning (reviewed models state this explicitly).
     retains: list[int] = field(default_factory=list)
+    # The call starts a thread of control running the function passed as this argument ("unknown":
+    # a handler Weaver cannot identify, e.g. inside a struct sigaction).  See weaver.flow.tasks.
+    spawns: int | str | None = None
 
     def owned(self, file: str | None) -> bool:
         return bool(file) and any(fnmatch.fnmatch(file, g) for g in self.owns)
@@ -45,6 +48,7 @@ class EffectModel:
             "writes_owned": self.writes_owned,
             "owns": self.owns,
             "retains": self.retains,
+            "spawns": self.spawns,
         }
 
 
@@ -115,6 +119,7 @@ def _remap(model: EffectModel, name: str, base: str) -> EffectModel | None:
         writes_owned=model.writes_owned,
         owns=model.owns,
         retains=[mv(i) for i in model.retains],
+        spawns=mv(model.spawns) if isinstance(model.spawns, int) else model.spawns,
     )
 
 
@@ -168,8 +173,17 @@ def _entries(funcs: dict[str, Any], source: str, owns: list[str] | None = None) 
             writes_owned=wo,
             owns=pack_owns,
             retains=[int(i) for i in spec.get("retains", [])],
+            spawns=_spawns(name, spec.get("spawns")),
         )
     return out
+
+
+def _spawns(name: str, v: Any) -> int | str | None:
+    if v is None or v == "unknown":
+        return v
+    if isinstance(v, int) and v >= 0:
+        return v
+    raise ConfigError(f"model {name}: 'spawns' must be an argument index or 'unknown'")
 
 
 def load_models(project: Any) -> Models:

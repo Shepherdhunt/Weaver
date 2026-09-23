@@ -59,12 +59,12 @@ functions:
   usleep:          {writes: [], calls_back: false}
   gettimeofday:    {writes: [0, 1], calls_back: false}
   time:            {writes: [0], calls_back: false}
-  timer_create:    {writes: [2], calls_back: false, assumptions: ["the notification handler runs asynchronously (concurrency contract)"]}
+  timer_create:    {writes: [2], calls_back: false, spawns: unknown, assumptions: ["the notification handler runs asynchronously (concurrency contract)"]}
   timer_settime:   {writes: [3], calls_back: false}
   timer_delete:    {writes: [], calls_back: false}
 
   # -- threads and synchronisation -----------------------------------------------------------
-  pthread_create:  {writes: [0], calls_back: true, retains: [3], assumptions: ["the start routine runs concurrently"]}
+  pthread_create:  {writes: [0], calls_back: true, retains: [3], spawns: 2, assumptions: ["the start routine runs concurrently"]}
   pthread_exit:    {writes: [], calls_back: true, assumptions: ["cleanup handlers and TLS destructors run"]}
   pthread_cancel:  {writes: [], calls_back: false, assumptions: ["the target thread's cleanup handlers run in that thread"]}
   pthread_kill:    {writes: [], calls_back: true, assumptions: ["a signal to the calling thread runs its handler"]}
@@ -130,8 +130,8 @@ functions:
   sched_yield:   {writes: [], calls_back: false}
 
   # -- signals and process control -------------------------------------------------------
-  sigaction:   {writes: [2], calls_back: false, assumptions: ["installed handlers run asynchronously (concurrency contract)"]}
-  signal:      {writes: [], calls_back: false, assumptions: ["installed handlers run asynchronously (concurrency contract)"]}
+  sigaction:   {writes: [2], calls_back: false, spawns: unknown, assumptions: ["installed handlers run asynchronously (concurrency contract)"]}
+  signal:      {writes: [], calls_back: false, spawns: 1, assumptions: ["installed handlers run asynchronously (concurrency contract)"]}
   sigprocmask: {writes: [2], calls_back: false}
   sigemptyset: {writes: [0], calls_back: false}
   sigfillset:  {writes: [0], calls_back: false}

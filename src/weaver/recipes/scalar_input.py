@@ -381,16 +381,7 @@ class ScalarInputRecipe(Recipe):
                 )
 
         # -- concurrency contract ---------------------------------------------------
-        conc = str(ctx.project.preservation.get("concurrency", "")).strip()
-        if conc in CONCURRENCY_OK:
-            pos("concurrency", f"preservation contract: concurrency = {conc}")
-        else:
-            P["concurrency"].fail(
-                UNRESOLVED,
-                "no concurrency model is declared; another thread, task or interrupt "
-                "could write the target during the call",
-                "declare 'preservation: {concurrency: single-threaded}' in weaver.yaml if true",
-            )
+        self._check_concurrency(ctx, fkey, fname, idx, flows, P["concurrency"], pos)
 
         # -- complete callers ----------------------------------------------------------
         self._check_callers(ctx, fname, fsum, decls, callers, P["callers"], pos)
@@ -534,6 +525,64 @@ class ScalarInputRecipe(Recipe):
                     out.append(rel_or_abs(os.path.join(dirpath, fn), ctx.root))
         ctx._asm_cache = out  # type: ignore[attr-defined]
         return out
+
+    @staticmethod
+    def _check_concurrency(
+        ctx: RecipeContext,
+        fkey: str,
+        fname: str,
+        idx: int,
+        flows: dict[str, Any],
+        pre: Precondition,
+        pos: Any,
+    ) -> None:
+        """No other thread of control may write the target while the call runs (see weaver.flow.tasks)."""
+        from weaver.flow.tasks import spawn_sites, spec_of
+
+        conc = ctx.project.preservation.get("concurrency")
+        spec = spec_of(ctx.project.preservation)
+        if spec is None:
+            text = str(conc or "").strip()
+            if text not in CONCURRENCY_OK:
+                pre.fail(
+                    UNRESOLVED,
+                    "no concurrency model is declared; another thread, task or interrupt "
+                    "could write the target during the call",
+                    "declare 'preservation: {concurrency: single-threaded}' if true, or declare the program's tasks "
+                    "('concurrency: {model: tasks, ...}')",
+                )
+                return
+            progs = set(flows) or ctx.program.programs_of(fkey)
+            sites = spawn_sites(ctx.program, progs)
+            if sites:
+                s0 = sites[0]
+                pre.fail(
+                    VIOLATED,
+                    f"the preservation contract says '{text}', but {s0['callee']}() starts a thread of control at "
+                    f"{s0['site'].get('file')}:{s0['site'].get('line')} ({len(sites)} such call(s))",
+                    "declare the program's tasks instead ('concurrency: {model: tasks, ...}')",
+                )
+                return
+            pos("concurrency", f"preservation contract: concurrency = {text}; no call in the program starts a thread")
+            return
+        if not flows:
+            pre.fail(UNRESOLVED, "the task model needs the function's program (link model) and its flow evidence")
+            return
+        for key, fe in flows.items():
+            if fe is None:
+                pre.fail(UNRESOLVED, f"{key}: the task model needs current SVF points-to evidence", "run 'weaver flow'")
+                continue
+            targets = fe.param_targets(fname, idx)
+            if not targets:
+                pre.fail(UNRESOLVED, f"{key}: no points-to targets for argument {idx + 1} of {fname}()")
+                continue
+            profile, _, prog = key.partition("/")
+            tm = ctx.tasks(profile, prog)
+            status, ok, bad = tm.concurrent(fkey, set(targets))
+            for t in ok:
+                pos("concurrency", f"{key}: {t}")
+            for t in bad[:6]:
+                pre.fail(VIOLATED if status == "violated" else UNRESOLVED, f"{key}: {t}")
 
     @staticmethod
     def _link_problems(ctx: RecipeContext, fname: str, units: list[str], static: bool) -> list[tuple[str, str]]:

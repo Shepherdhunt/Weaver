@@ -83,9 +83,14 @@ class LinkModel:
         self.unit_file: dict[str, str] = {}
         by_output: dict[str, str] = {}
         by_basename: dict[str, list[tuple[str, str]]] = {}
+        # (directory, source, argv) -> unit: a source compiled by the link command itself
+        by_invocation: dict[tuple[str, str, tuple[str, ...]], str] = {}
         for c in cmds:
             uid = c.unit_id(profile.id)
             self.unit_file[uid] = c.file
+            by_invocation[
+                (os.path.realpath(c.directory), os.path.realpath(os.path.join(c.directory, c.file)), tuple(c.arguments))
+            ] = uid
             if c.output:
                 out = os.path.realpath(os.path.join(c.directory, c.output))
                 by_output[out] = uid
@@ -122,8 +127,20 @@ class LinkModel:
                     img.unmapped.extend(f"{inp}({m})" for m in unmapped)
                 else:
                     img.unmapped.append(inp)
-            for src in link.get("compiled_sources", []):
-                img.unmapped.append(f"{src} (compiled during the link)")
+            srcs = link.get("compiled_sources", [])
+            for src in srcs:
+                path = os.path.realpath(os.path.join(link["cwd"], src))
+                # a one-step "cc -o app a.c" is recorded as a compile entry with the link's arguments
+                # (or, for several sources, the arguments without the other sources)
+                others = {os.path.realpath(os.path.join(link["cwd"], o)) for o in srcs if o != src}
+                argv = tuple(
+                    a for a in link.get("argv", []) if os.path.realpath(os.path.join(link["cwd"], a)) not in others
+                )
+                uid = by_invocation.get((os.path.realpath(link["cwd"]), path, argv))
+                if uid is not None:
+                    img.units.append(uid)
+                else:
+                    img.unmapped.append(f"{src} (compiled during the link)")
             img.libraries = _libraries(argv, link["cwd"])
             if os.path.exists(out):
                 img.exports, img.imports = _dynamic_symbols(out)

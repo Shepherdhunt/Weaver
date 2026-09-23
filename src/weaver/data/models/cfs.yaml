@@ -112,7 +112,7 @@ functions:
   OS_read:         {writes: [1], calls_back: false, boundary: true, writes_owned: true}
   OS_write:        {writes: [], calls_back: false, boundary: true, writes_owned: true}
   OS_TaskGetId:    {writes: [], calls_back: false, boundary: true}
-  OS_TaskCreate:   {writes: [0], calls_back: true, boundary: true, writes_owned: true, retains: [3],
+  OS_TaskCreate:   {writes: [0], calls_back: true, boundary: true, writes_owned: true, retains: [3], spawns: 2,
                     assumptions: ["the task entry point runs concurrently"]}
   OS_TimerCreate:  {writes: [0, 2], calls_back: true, boundary: true, writes_owned: true,
                     assumptions: ["the timer callback runs asynchronously"]}

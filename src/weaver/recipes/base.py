@@ -236,6 +236,26 @@ class RecipeContext:
             )
         return self._gcc[key]
 
+    def tasks(self, profile_id: str, program: str) -> Any:
+        """The task model of one program (``preservation.concurrency: {model: tasks}``; see weaver.flow.tasks)."""
+        if not hasattr(self, "_tasks"):
+            self._tasks: dict[tuple[str, str], Any] = {}
+        key = (profile_id, program)
+        if key not in self._tasks:
+            from weaver.flow.svf import _safe
+            from weaver.flow.tasks import TaskModel, spec_of
+
+            lm = self.link(profile_id)
+            prog = lm.program(program)
+            self._tasks[key] = TaskModel(
+                self.program,
+                self.flows(profile_id).get(_safe(program)),
+                f"{profile_id}/{program}",
+                spec_of(self.project.preservation) or {},
+                prog.entry_points if prog is not None else [],
+            )
+        return self._tasks[key]
+
     def programs_for_units(self, units: list[str]) -> dict[str, list[str]]:
         """``profile/program`` keys of the programs that link any of ``units``, with their unit ids."""
         out: dict[str, list[str]] = {}
