@@ -217,11 +217,19 @@ def default_profile(project: Project) -> str:
     return str(_config(project).get("profile") or "clite-provisional")
 
 
-def _recursive(funcs: dict[str, dict[str, Any]]) -> dict[str, int | None]:
-    """Functions on a call cycle (direct or mutual) -> line of a call that stays on the cycle."""
+def _recursive(
+    funcs: dict[str, dict[str, Any]], programs_of: Callable[[str], set[str]] | None = None
+) -> dict[str, int | None]:
+    """Functions on a call cycle (direct or mutual) -> line of a call that stays on the cycle.
+
+    A call resolves to the definitions of that name linked into the same program (``programs_of``,
+    from the link model), so test stubs that share names with real functions do not join them into
+    false cycles.  Without link information every definition of the name is a candidate.
+    """
     by_name: dict[str, list[str]] = {}
     for k, f in funcs.items():
         by_name.setdefault(f["name"], []).append(k)
+    progs = {k: programs_of(k) for k in funcs} if programs_of else {}
 
     def callees(k: str) -> list[tuple[str, int | None]]:
         f = funcs[k]
@@ -229,7 +237,12 @@ def _recursive(funcs: dict[str, dict[str, Any]]) -> dict[str, int | None]:
         for c in f.get("calls", []):
             ks = by_name.get(c.get("callee") or "", [])
             same = [x for x in ks if funcs[x]["file"] == f["file"]]
-            for t in same or [x for x in ks if not funcs[x].get("static")]:
+            cands = same or [x for x in ks if not funcs[x].get("static")]
+            if progs:
+                mine = progs[k]
+                linked = [x for x in cands if progs[x] & mine] if mine else [x for x in cands if not progs[x]]
+                cands = linked or ([] if mine else cands)
+            for t in cands:
                 out.append((t, (c.get("site") or {}).get("line")))
         return out
 
@@ -286,8 +299,12 @@ def check(
     inv: dict[str, Any],
     profile: str | None = None,
     in_scope: Callable[[str], bool] = lambda _path: True,
+    ctx: Any = None,
 ) -> dict[str, Any]:
-    """Every analysed function (in scope) against one profile."""
+    """Every analysed function (in scope) against one profile.
+
+    ``ctx`` (a RecipeContext for ``inv``) supplies the link model for recursion; one is made if needed.
+    """
     profs = profiles(project)
     pid = profile or default_profile(project)
     if pid not in profs:
@@ -300,7 +317,12 @@ def check(
     for f in inv["findings"]:
         if f.get("kind") in POINTER_KINDS and f.get("file"):
             pointers.setdefault(f"{f['file']}::{f.get('function') or '(file scope)'}", []).append(f)
-    recursive = _recursive(funcs) if "recursion" in rules else {}
+    recursive: dict[str, int | None] = {}
+    if "recursion" in rules:
+        from weaver.recipes import RecipeContext
+
+        prog = (ctx or RecipeContext(project, inv)).program
+        recursive = _recursive(funcs, prog.programs_of if prog.unit_programs else None)
 
     def violations(key: str, fs: dict[str, Any] | None) -> list[dict[str, Any]]:
         v: dict[tuple[str, int | None, str], dict[str, Any]] = {}

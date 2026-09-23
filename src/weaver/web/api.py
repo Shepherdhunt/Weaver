@@ -279,7 +279,7 @@ def simplify_view(project: Project, cache: Cache, profile: str | None = None) ->
     inv, _ = cache.get(project)
     key = profile or ""
     if key not in cache.simplify:
-        cache.simplify[key] = check(project, inv, profile, cache.in_scope)
+        cache.simplify[key] = check(project, inv, profile, cache.in_scope, cache.ctx)
     return cache.simplify[key]
 
 
