@@ -1,6 +1,6 @@
 # Weaver report: cfs-pilot (apps/sample_app)
 
-Generated 2026-09-23T14:37:49+00:00 by Weaver 0.1.0 at commit `088b2fa828db`.
+Generated 2026-09-23T16:11:49+00:00 by Weaver 0.1.0 at commit `088b2fa828db`.
 
 ## Evidence
 
@@ -43,7 +43,7 @@ None.
 | `SBBufPtr` in `SAMPLE_APP_TaskPipe` (`apps/sample_app/fsw/src/sample_app_dispatch.c:132`) | `scalar-input` | ✗ SI.parameter-type: pointee 'const CFE_SB_Buffer_t' is not a scalar type<br>✗ SI.read-only-uses: line 146: arrow (address)<br>✗ SI.unconditional-read: native: no read of the target is executed on every path from entry; reading at the call site would add a read the original program does not perform<br>✗ SI.no-modification-during-call: SAMPLE_APP_TaskPipe() at apps/sample_app/fsw/src/sample_app_dispatch.c:162: CFE_EVS_SendEvent() may write framework-owned BufDscPtr, CFE_Assert_StatusReport, CF |
 | `TblData` in `SAMPLE_APP_TblValidationFunc` (`apps/sample_app/fsw/src/sample_app_utils.c:37`) | `scalar-input` | ✗ SI.parameter-type: pointee 'void' is not a scalar type<br>✗ SI.read-only-uses: line 40: explicitly converted (BitCast) to SAMPLE_APP_ExampleTable_t *<br>✗ SI.unconditional-read: native: no read of the target is executed on every path from entry; reading at the call site would add a read the original program does not perform<br>? SI.no-modification-during-call: GCC (sample_app.so): argument 1 may point to memory outside the image, and the call writes memory [native/cpu1] |
 | `TblDataPtr` in `SAMPLE_APP_TblValidationFunc` (`apps/sample_app/fsw/src/sample_app_utils.c:40`) | `local-alias` | ✗ LA.target-stable: initializer is a CStyleCastExpr(BitCast), not the address of an object |
-| `TableName` in `SAMPLE_APP_GetCrc` (`apps/sample_app/fsw/src/sample_app_utils.c:59`) | `scalar-input` | ✗ SI.read-only-uses: line 65: passed as argument 2 to CFE_TBL_GetInfo()<br>✗ SI.unconditional-read: native: no read of the target is executed on every path from entry; reading at the call site would add a read the original program does not perform<br>? SI.no-modification-during-call: SAMPLE_APP_GetCrc() at apps/sample_app/fsw/src/sample_app_utils.c:65: CFE_TBL_GetInfo() writes through argument 1: points-to set includes unknown memory (native<br>? SI.no-concurrent-writers: no concurrency model is declared; another thread, task or interrupt could write the target during the call |
+| `TableName` in `SAMPLE_APP_GetCrc` (`apps/sample_app/fsw/src/sample_app_utils.c:59`) | `scalar-input` | ✗ SI.read-only-uses: line 65: passed as argument 2 to CFE_TBL_GetInfo()<br>✗ SI.unconditional-read: native: no read of the target is executed on every path from entry; reading at the call site would add a read the original program does not perform<br>? SI.no-modification-during-call: SAMPLE_APP_GetCrc() at apps/sample_app/fsw/src/sample_app_utils.c:65: CFE_TBL_GetInfo() writes through argument 1: points-to set includes unknown memory (native<br>? SI.no-concurrent-writers: native/cpu1: the parameter of SAMPLE_APP_GetCrc() may point to memory points-to analysis cannot identify |
 
 ## Contracts
 

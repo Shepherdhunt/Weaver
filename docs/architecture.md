@@ -1,4 +1,4 @@
-# Weaver architecture (milestones 1-3)
+# Weaver architecture (milestones 1-3, task ownership)
 
 This document maps the planning documents to code, records design decisions, and lists known limits
 and next steps. "Tracker" refers to `pointer-tracker-plan.md`; "artifact" refers to
@@ -74,6 +74,24 @@ Milestone 3 (the cFS pilot) makes these whole-program and production-compiler aw
   validate: per-test comparison (CTest, Meson) and a recorded strength (behavioural / compile-only)
 ```
 
+Task ownership and scale make the interface recipes usable on multi-task programs:
+
+```
+  weaver.yaml preservation.concurrency: tasks, interrupts, dispatchers, indirect-call targets
+        │  checked against thread starts (models with `spawns`), the link model's entry points,
+        │  SVF's unresolved indirect calls, and `unless_called` guards
+        ▼
+  flow.tasks.TaskModel: contexts ──▶ call-graph closures ──▶ per-context write summaries (SVF objects)
+        │                            thread-escape closure from shared roots (globals, heap, unknown
+        │                            memory, thread-start arguments, pointers converted to integers)
+        ▼
+  SI.no-concurrent-writers: concurrent(function, targets) ──▶ established / violated / unresolved
+
+  analysis.identindex (identifier -> files, cached on disk) + bounded lexer and AST caches + slotted,
+  interned locations ──▶ whole-program evaluation of cFS in under 1 GB
+  web.export ──▶ `weaver export-ui`: the interface's recorded answers as one read-only page
+```
+
 ## Module map
 
 | Module | Plan section | Responsibility |
@@ -113,6 +131,9 @@ Milestone 3 (the cFS pilot) makes these whole-program and production-compiler aw
 | `data/models/posix.yaml`, `data/models/cfs.yaml` | artifact §7 | Reviewed effect-model packs: POSIX/glibc (always loaded) and `builtin:cfs` (cFE/OSAL APIs as boundary models, framework-owned state, retained arguments). |
 | `analysis/borrow.py` | tracker §3 | The borrowed-pointer contract: follows a pointer through casts, copies and calls, and reports writes, retention and unknown sinks. |
 | `report.py` | tracker roadmap | `weaver report`: inventory and rejection report for a scope of the project. |
+| `flow/tasks.py` | tracker §5 | Task model: declared threads of control checked against thread starts and entry points, per-context write summaries, thread-escape analysis, and the concurrent-writer query behind `weaver tasks` and `SI.no-concurrent-writers`. |
+| `analysis/identindex.py` | tracker §§3, 9 | Identifier-to-files index for whole-tree textual reference scans, cached on disk by path, size and modification time. |
+| `web/export.py` | — | `weaver export-ui`: records the interface's read-only answers (optionally for a scope) into one HTML page that needs no server. |
 | `testdetect.py`, `settings.py` | tracker §7 | Detecting a project's test commands (Make, CTest, Meson, scripts), and editing validation commands and the acceptance policy in `weaver.yaml` with a backup and reload check. |
 
 ## Design decisions
@@ -166,8 +187,9 @@ only when nothing is unknown.
 
 **Interface recipes need declared assumptions.** Reading `*p` once at the call site instead of
 inside the callee is only equivalent if no other thread writes the object during the call. The
-recipe therefore requires `preservation.concurrency: single-threaded` (or an equivalent
-declaration) and otherwise stays unresolved. It also requires a complete caller set. That means
+recipe therefore requires a concurrency declaration: `single-threaded` (checked: no call in the
+program starts a thread) or a task model (below), and otherwise stays unresolved. It also requires
+a complete caller set. That means
 the address is never taken, every textual reference to the name, including inactive code, is an
 analysed call or declaration, every linked object was analysed, and the interface is not frozen.
 
@@ -254,6 +276,44 @@ that passes there and fails with the patch rejects the change. A test that fails
 recorded as pre-existing and not attributed to the patch. Before this, one sandbox-dependent OSAL
 test made every cFS transaction fail validation.
 
+**Concurrency is a declared, checked task model.** Which code runs in which thread of control is
+a property of the whole system, often decided by a start-up script or a table, so Weaver does not
+guess it. The project declares its tasks, interrupt contexts, dispatchers (trampolines such as
+`OS_PthreadTaskEntry` that run in every task they start) and targets for indirect calls SVF cannot
+resolve. Weaver then checks the declaration against the code. Every call whose effect model
+`spawns` a thread (`pthread_create`, `OS_TaskCreate`, `signal`) must start a declared entry,
+identified by name or by the argument's points-to set. Every entry point of the link model must
+belong to a context. A declared indirect-call resolution is refused when the program calls a
+function listed in its `unless_called` (the one that would install more targets). Anything missing
+makes the model incomplete, and an incomplete model establishes nothing. Programs the declaration
+does not cover must start no thread.
+
+**Stack objects are private unless their address escapes.** Write summaries are context-insensitive:
+a helper called from two tasks appears to write, in each, everything any caller passes it. Without
+more, every caller's local would look shared. A local lives in the frame of the task running its
+function, and another task, or another instance of the same task, can reach it only through its
+address. Weaver computes the closure of object contents in SVF's points-to graph from the shared
+roots: globals, heap and unknown objects, arguments handed to a thread start (a model's `shares`),
+and pointers converted to integers (recorded with their operand, so `(uintptr_t)&x` exposes `x`). A
+stack target outside that closure cannot be written concurrently. This relies on pointer
+provenance, which optimizing compilers already assume. If a conversion's operand cannot be mapped,
+no local is exempted.
+
+**Memory scales with the analysed program, not the source tree.** Whole-program evaluation of cFS
+peaked at 6.8 GB. Most of it was whole-tree token lists for complete-caller scans (1.6 million
+tokens) and AST dictionaries kept after their locations were resolved. The scans now use an
+identifier-to-files index, cached on disk, and re-lex only the few files that mention a name.
+Lexed files and ASTs live in bounded LRU caches. Locations and tokens are slotted and interned, raw
+location dictionaries are dropped once resolved, and documentation-comment nodes are skipped while
+their locations still advance the resolver's state. Peak memory is now under 1 GB for the same
+run.
+
+**A read-only snapshot shares the interface without a server.** `weaver export-ui` asks the same
+routes the browser asks, for every view that changes nothing, and embeds the answers next to the
+unchanged `app.js`, which serves them in snapshot mode. Actions that would change the project show
+the command that runs them locally. Paths of the exporting machine are replaced by the project
+name. The page contains the analysed source code, so it is shared like the source tree.
+
 ## Known limits
 
 - Inventory facts are syntactic. Their possible targets are intraprocedural hypotheses, labelled as
@@ -264,16 +324,22 @@ test made every cFS transaction fail validation.
   (see [`pilots/cfs`](../pilots/cfs/README.md)). It is most useful as an independent cross-check,
   and as the only backend where SVF cannot be used. Scalar-input is the only recipe that consults
   it so far.
-- Whole-program recipe evaluation on cFS takes about 3.5 minutes per recipe, with about 7 GB peak
-  resident memory. ASTs are cached with a bounded LRU (before that, memory grew past 10 GB), but
-  function summaries and flow evidence for the whole program stay in memory.
+- Whole-program recipe evaluation on cFS takes about 4 minutes per recipe with under 1 GB peak
+  memory. Function summaries and flow evidence for the whole program stay in memory, so memory
+  still grows with the size of the analysed program; the rest of the source tree costs only its
+  identifier index.
 - `scalar-input` handles pointers to scalars that are spelled as plain pointer declarators. Struct
   targets, pointer-to-pointer, array parameters and typedef'd pointer parameters are blocked.
 - Effect models cover POSIX/glibc and the cFE/OSAL APIs `sample_app` uses. Other cFS
   applications will call APIs without a reviewed model, and those calls answer `unknown`.
-- cFS applications run in their own OSAL tasks. The pilot declares no concurrency model, so every
-  interface candidate stays blocked on `SI.no-concurrent-writers`. That is the right answer until
-  someone states which data each task owns.
+- The task model is only as precise as SVF's field- and context-insensitive points-to sets. A write
+  to one field of a global table counts as a write to the whole table, and writes through pointers
+  into memory SVF cannot identify make a context's writes unbounded. On cFE no global has a single
+  owner at this precision.
+- Locks are not modelled. A write under the same mutex as the call still counts as concurrent, so
+  the answer can only be conservative. Instance counts are declared (`instances: many`), not read
+  from start-up scripts.
+- Only programs with current SVF evidence get a task model. GCC's points-to is not used for it yet.
 - `local-alias` covers automatic locals in a unit's main file. Pointers declared in headers need
   coverage across translation units and are reported as unresolved.
 - Coverage treats lines inside a parenthesized group opened on a covered line as covered, because
@@ -289,11 +355,12 @@ test made every cFS transaction fail validation.
 
 ## Next milestones (from the plans' roadmaps)
 
-1. **Per-task ownership for cFS**: a declared concurrency model finer than "single-threaded"
-   (which task owns which object), checked against OSAL task creation, so interface recipes can
-   pass `SI.no-concurrent-writers` in multi-task programs.
-2. **Output parameter to return value**: the second interface recipe. It needs "written on every
-   path before any read" and the same complete-caller and may-modify machinery.
+1. **Output parameter to return value**: the second interface recipe, and the one cFE's idioms call
+   for (most scalar pointer parameters there return a value next to a status code). It needs
+   "written on every path before any read" and the same complete-caller, may-modify and task checks.
+2. **Field-sensitive, lock-aware ownership**: field objects linked to their base in the points-to
+   evidence, so a task's write to one field of `CFE_ES_Global` does not cover the others, and lock
+   regions from OSAL mutex models, so writes under the call's own lock are not concurrent.
 3. **More GCC evidence**: use GCC's points-to in `local-alias` and in the borrow check, and read
    modref summaries at the production optimization level.
 4. **Bounded checking**: CBMC equivalence harnesses as a `bounded-check` validation kind, recording

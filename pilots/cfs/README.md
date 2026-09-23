@@ -19,6 +19,7 @@ weaver -C cfs refresh --capture         # rebuild through shims, collect, fideli
 weaver -C cfs report --scope apps/sample_app -o cfs/REPORT.md
 weaver -C cfs contract pin P-6af1f4646a --expect borrowed --reason "cfe_sb.h: valid until the next receive"
 weaver -C cfs candidates --recipe local-alias    # eligible candidates, whole program
+weaver -C cfs tasks                     # the declared tasks, what was checked, who writes which global
 weaver -C cfs serve                     # or explore in the browser
 ```
 
@@ -30,7 +31,8 @@ the commit in [`submodules.txt`](submodules.txt). It changes nothing in the cFS 
   The pilot's [`targets.cmake`](pilot_targets.cmake), [`install_custom.cmake`](pilot_install_custom.cmake)
   and [`generate_startup.cmake`](pilot_generate_startup.cmake) replace the stock files.
 - [`weaver.yaml`](weaver.yaml): one profile (`native`, GCC production compiler, Clang as secondary
-  frontend), the `cpu1` program, the `builtin:cfs` effect models, and CTest validation.
+  frontend), the `cpu1` program and its threads of control, the `builtin:cfs` effect models, and
+  CTest validation.
 
 ## What Weaver sees
 
@@ -63,8 +65,9 @@ target: 8 escape, 4 are unused, 2 are read-only and 1 is reassigned. No refactor
   - `SI.complete-callers` (10). `sample_app_eds_dispatch.c`, compiled only with
     `CFE_EDS_ENABLED=ON`, and the coverage tests under `unit-test/` name these functions. Neither
     is in the analysed configuration, so those references are not explained by analysed calls.
-  - `SI.no-concurrent-writers` (10, unresolved). cFS applications run in their own OSAL tasks and
-    share data through the software bus and tables, so the pilot declares no concurrency model.
+  - `SI.no-concurrent-writers` (10). The software-bus messages come from a buffer pool addressed
+    with integer arithmetic, so their points-to sets contain unknown memory, and no task model can
+    exclude another writer (see [Tasks and ownership](#tasks-and-ownership)).
 - **`local-alias`** applies to the 5 locals, and `LA.target-stable` is the only precondition each
   fails. `SBBufPtr`, `TblAddr` and `TblPtr` have no initializer: they are set by
   `CFE_SB_ReceiveBuffer(&SBBufPtr, …)`, by `CFE_TBL_GetAddress(&TblAddr, …)`, and by
@@ -104,8 +107,8 @@ candidates in the pilot, by `flow.backend` and `flow.agreement`:
 | Both, `agreement: all` (default) | 85 | 685 | 1,101 |
 | Both, `agreement: any` | 336 | 685 | 850 |
 
-Each evaluation takes about 200 s with 6.8 GB peak memory. The backends' own jobs take 10.6 s (SVF,
-`cpu1`) and 8.5 s (GCC, all images).
+Each evaluation took about 200 s with 6.8 GB peak memory, since reduced to under 1 GB (see
+*Cost* below). The backends' own jobs take 10.6 s (SVF, `cpu1`) and 8.5 s (GCC, all images).
 
 Where both backends decide, they agree: 85 candidates with no write and 188 with a write. On no
 candidate does GCC trace a write that SVF rules out. The rest:
@@ -141,6 +144,82 @@ agreement (`all`) keeps 85 of SVF's 330 "no write" answers, for the confidence o
 independent analyses. `any` keeps all 330, adds GCC's six, and still lets a write either backend
 traces block the candidate. Without SVF, GCC alone establishes 93: weaker, but it needs no AGPL
 component.
+
+## Tasks and ownership
+
+Every interface refactor rests on one question about concurrency: while the call runs, can another
+thread of control write the object? cFS runs each application and each cFE service in its own OSAL
+task, so "single-threaded" is false. The pilot therefore declares `cpu1`'s threads of control in
+[`weaver.yaml`](weaver.yaml) (`preservation.concurrency`):
+
+- 13 tasks: start-up, the five cFE services, three cFE child tasks, `SAMPLE_APP`, and the OSAL time
+  base, OSAL console and PSP system-monitor threads;
+- 2 interrupt contexts (signal handlers);
+- the two trampolines through which OSAL and ES start every task (*dispatchers*);
+- targets for the three indirect calls SVF cannot resolve.
+
+Weaver checks the declaration against the code (`weaver tasks`):
+
+- Every call that starts a thread of control must start a declared entry. `pthread_create`,
+  `OS_TaskCreate` and `signal` carry a `spawns` argument in their effect models. The entry is taken
+  from the function named in the argument, or from the argument's points-to set.
+- Every program entry point must belong to a context.
+- A declared resolution of an indirect call is refused if the program calls the function that would
+  install more targets: the time-sync callbacks are declared empty only because nothing calls
+  `CFE_TIME_RegisterSynchCallback`.
+
+The result is complete: 17 contexts, every thread start accounted for, and every indirect call
+resolved. Two handler installations Weaver cannot identify (`sigaction` in the PSP, `timer_create`
+in OSAL) are recorded as assumptions covered by the declared interrupt contexts. The five host
+tools are separate programs, and Weaver confirms that they start no thread.
+
+For each candidate, `SI.no-concurrent-writers` asks whether any context other than the one running
+the call, or a second instance of it, may write a possible target. Each context's writes are
+summarised once from SVF's points-to sets over its whole call-graph closure, including the cFE code
+the task runs through API calls. A stack target is exempt when its address never escapes its task:
+it is never stored, directly or through other objects, into a global, the heap or unknown memory,
+never handed to a thread start, and never converted to an integer. Over the 1,871 scalar-input
+candidates:
+
+| | Established | Violated | Unresolved |
+|---|---|---|---|
+| no concurrency model (before) | 0 | 0 | 1,871 |
+| declared tasks | 879 | 281 | 711 |
+
+- **Established (879).**
+  - 338: only the task running the call writes the targets. Most are callers' locals whose address
+    no other task holds.
+  - 338: the parameter points to no object in any analysed call.
+  - 121: no declared task runs the function (`cfe_assert` code that `cpu1` links but never starts).
+  - 82: host tools, which start no thread.
+
+  The local exemption relies on pointer provenance: code that never receives an object's address
+  cannot reach the object, even through a pointer made from an integer.
+- **Violated (281).** Each names the task, function and line of a possible concurrent write, for
+  example "task CFE_TIME may write CFE_ES_Global: CFE_ES_ExitApp() at cfe_es_api.c:…".
+- **Unresolved (711).**
+  - 347: a target in memory SVF cannot identify. Software-bus messages and pool buffers are
+    addressed with integer arithmetic.
+  - 344: OSAL and cFE unit-test stubs, which the build compiles but links into no program.
+  - 8: `cfe_testcase.so`, which starts tasks and is not covered by the declaration.
+  - 5: a context whose writes cannot be bounded.
+  - 7: arguments with no points-to facts.
+
+No scalar-input candidate becomes eligible, because none was blocked by concurrency alone. The
+pointer idioms of cFE block them first. Of the 380 parameters that point to a scalar, the
+pointer is:
+
+- passed on to another function (150);
+- only written, never read: an output parameter returning a value next to a status code (most of
+  the rest);
+- taken by address (64);
+- compared with NULL before any read.
+
+The recipe that would apply to cFE is an output-parameter recipe for functions that already return
+a status. It will need the same task check. `weaver tasks` also lists which contexts may write each
+global. On cFE no global has a single owner: field-insensitive points-to sets and library calls
+such as `memchr` give pointers very large targets. Proving ownership of cFE's globals needs
+field-sensitive points-to evidence, a next step.
 
 ## `SBBufPtr` as a borrowed buffer
 
@@ -195,9 +274,10 @@ POSIX and glibc calls (about 190 functions) come from a separate pack that is al
 - **Integer address arithmetic reaches SVF's black-hole object.** cFE's memory pools and
   software-bus buffer descriptors compute addresses from integers. SVF then models the result as
   pointing to unknown memory, and may-modify answers `unknown`, never `no`.
-- **No concurrency model is declared.** Interface refactors stay blocked on
-  `SI.no-concurrent-writers` until someone states which task owns which data. A per-task ownership
-  model is the next milestone.
+- **Task declarations are part of the preservation contract.** Weaver checks that every thread
+  start is declared and that the declared contexts cover the program, but not how many times the
+  startup script starts an application: each declared task is assumed to run once unless marked
+  `instances: many`.
 - **Other configurations name the same functions.** The capture profile builds without unit tests
   and without EDS, which matches the flight build. The coverage tests and the EDS dispatch table
   still name application functions, so complete-caller checks fail on references no analysed
@@ -206,5 +286,7 @@ POSIX and glibc calls (about 190 functions) come from a separate pack that is al
 - **Sandbox-dependent tests fail on both trees.** Per-test comparison keeps them from blocking
   every transaction, and the card lists them.
 - **Cost.** Fidelity takes about 2 minutes. Evaluating one recipe over the whole program takes
-  about 3.5 minutes, with about 7 GB peak resident memory. Validating one transaction takes about
+  about 4 minutes with under 1 GB peak memory: 964 MB, and 975 MB with the task model, down from
+  6.8 GB before the identifier index, bounded caches and AST pruning. Building the task model
+  takes about 1 s. Validating one transaction takes about
   70 s (two full builds with unit tests, and CTest twice).

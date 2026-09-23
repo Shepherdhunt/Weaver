@@ -34,20 +34,21 @@ can be accepted. The optional LLM explains and recommends; it never edits or val
 | **GCC flow evidence** | For GCC profiles, `weaver flow --backend gcc` asks the production compiler: each unit is recompiled with `-flto -fipa-pta`, each image's link is replayed, and GCC's own points-to and clobber sets answer may-modify. SVF and GCC are cross-checked (`flow.backend`, `flow.agreement`); a write found by either blocks. SVF is optional. |
 | **May-modify query** | Can a call write what a parameter points to? It takes the closure over the call graph (with indirect calls resolved by SVF), named writes, writes through pointers intersected with points-to sets, and reviewed models of library functions. An unmodelled external call answers `unknown`, never `no`. |
 | **Effect models** | Reviewed packs: POSIX/glibc (always loaded) and `builtin:cfs` for cFE and OSAL APIs, as boundary models that stand in for the framework's code, with framework-owned state and retained arguments. |
+| **Task ownership** | For multi-task programs, `preservation.concurrency` declares the tasks, interrupt contexts, dispatchers and unresolved indirect-call targets. Weaver checks the declaration against every thread start and entry point, summarises each context's writes, and exempts stack objects whose address never escapes their task. `SI.no-concurrent-writers` then names the task and line of a possible concurrent write, or establishes that none exists. `weaver tasks` shows the contexts, what was checked and which contexts may write each global. |
 | Recipe `local-alias` (tracker §§4-5) | Replaces a local alias of one known object with direct access to that object. 13 preconditions. |
-| **Recipe `scalar-input`** (tracker §5) | Turns a read-only pointer-to-scalar parameter into a value parameter, and rewrites every declaration, dereference and call site (`&x` → `x`, `p` → `*p`). 10 preconditions, including SVF-backed may-modify, a complete caller set, sequencing at each call site, and a declared concurrency model. |
+| **Recipe `scalar-input`** (tracker §5) | Turns a read-only pointer-to-scalar parameter into a value parameter, and rewrites every declaration, dereference and call site (`&x` → `x`, `p` → `*p`). 10 preconditions, including SVF-backed may-modify, a complete caller set, sequencing at each call site, and no concurrent writer (single-threaded, or decided by the task model). |
 | Transactions (tracker §6) | Candidate cards. States: discovered → analyzed → blocked / proposed → validated / provisional / rejected → accepted / skipped → reverted. Patches are bound to source hashes. Revert uses a three-way merge so later unrelated edits survive. |
 | Validation (tracker §7) | Isolated baseline and candidate workspaces. The production compiler rebuilds every unit whose main file *or included headers* were edited. A mechanical re-check parses the patched AST again. Configured builds, tests and differential comparisons run in both workspaces; CTest and Meson results are compared test by test, so a test that already fails on the baseline is not blamed on the patch. An acceptance policy judges the results. |
 | **Validation strength** | Each validation and acceptance records whether anything ran the patched program (`behavioural`) or not (`compile-only`), shown on the card, the ledger, impact reports and the web interface. `weaver tests` and the setup form detect the project's test commands (Make `test`/`check`, CTest, Meson, test scripts); the web settings editor changes validation commands and the acceptance policy. |
 | **Contracts on borrowed pointers** | `--expect borrowed`: the target is never written and the pointer is never kept past the call, checked through casts, copies and callees. The cFS software-bus buffer (`SBBufPtr`) holds through nine pointers in `sample_app`. |
 | **Rejection report** | `weaver report --scope apps/sample_app`: evidence, pointers by class, each recipe's eligible and blocked candidates with the failing preconditions, the precondition that alone blocks the most, and contract status. |
 | **Change impact** | Snapshots of pointer facts (the working tree, or any git revision). `weaver impact` explains each pointer whose behavior changed since a snapshot, which edited line caused it, which recipe verdicts flipped, which pinned or transaction-implied contracts broke, and optionally whether builds and differential runs still agree. `weaver check` exits 1 on high risk, for CI. |
-| **Web interface** | `weaver serve`: load or set up a project, compile, then explore a map of every pointer colored by what it does to its target. Graphs show points-to and call relationships, and a source view has inline marks. Refactors can be proposed, validated and accepted, contracts pinned, and change impact compared. |
+| **Web interface** | `weaver serve`: load or set up a project, compile, then explore a map of every pointer colored by what it does to its target. Graphs show points-to and call relationships, and a source view has inline marks. Refactors can be proposed, validated and accepted, contracts pinned, and change impact compared. `--scope` shows one subsystem of a large project. `weaver export-ui` records the interface as one read-only HTML page for sharing. |
 | LLM (tracker §10) | A focused evidence slice for one finding and the planner instruction taken verbatim from the plans. `weaver explain` runs an optional Claude tool loop whose tools can only read evidence. |
 
 Not yet, following the plans' roadmap: the output-parameter, buffer/range, typed-ID and callback
-recipes; per-task ownership models for multi-task programs such as cFS; CBMC equivalence
-harnesses; and vendor adapters (Diab, Green Hills). See
+recipes; field-sensitive and lock-aware ownership; CBMC equivalence harnesses; and vendor
+adapters (Diab, Green Hills). See
 [`docs/architecture.md`](docs/architecture.md).
 
 ## Install
@@ -68,6 +69,8 @@ standard library.
 
 ```sh
 weaver serve [PROJECT_DIR]      # http://localhost:8765, loopback only
+weaver serve --scope apps/sample_app            # large projects: show one subsystem at a time
+weaver export-ui -o weaver.html                 # a read-only copy of the interface, no server needed
 ```
 
 1. **Load**: open a directory that has a `weaver.yaml`, or set one up from the form. Give the build
@@ -116,6 +119,7 @@ weaver flow --backend gcc                     # points-to from the production GC
 weaver coverage                               # code no configuration compiled
 weaver candidates --all                       # eligible candidates, and blocked ones with reasons
 weaver report --scope src/net -o REPORT.md    # inventory and rejection report for part of the tree
+weaver tasks                                  # declared threads of control, what was checked, who writes each global
 
 weaver show P-1a2b3c4d5e                      # one finding: uses, targets, precondition evaluation
 weaver explain P-1a2b3c4d5e --dry-run         # the LLM request (or run it with credentials)
@@ -143,7 +147,15 @@ referenced as `{workspace}`:
 ```yaml
 preservation:
   behaviors: [outputs, persistent-state, side-effect-ordering]
-  concurrency: single-threaded        # interface recipes stay blocked until this is declared
+  concurrency: single-threaded        # checked: no call starts a thread; interface recipes need this
+  # or, for multi-task programs, the threads of control (see pilots/cfs/weaver.yaml):
+  # concurrency:
+  #   model: tasks
+  #   programs: [cpu1]
+  #   tasks: [{name: SAMPLE_APP, entry: SAMPLE_APP_Main}, {name: TIMEBASE, entry: OS_TimeBasePthreadEntry, instances: many}]
+  #   interrupts: [{name: SIGHUP, entry: OS_NoopSigHandler}]
+  #   dispatchers: [OS_PthreadTaskEntry]
+  #   indirect_calls: [{at: "src/app.c:120", targets: [on_tick]}]
 acceptance:
   require: [compile, mechanical-recheck, differential-testing]
 flow:
@@ -250,9 +262,12 @@ The end-to-end tests capture real builds of the fixture with Clang and GCC. They
 - the link model on a small program with an archive and a shared object, and capture exclusions;
 - effect-model packs, macro token comparison, the borrowed-pointer check and the report;
 - test detection, per-test comparison, validation strength, and the settings editor;
+- the task model on a pthreads program: private locals, shared globals, an address handed to a
+  thread, an address published as an integer, incomplete declarations and a contradicted
+  `single-threaded`;
 - change impact with contracts, git snapshots and revalidation;
-- the web server's request guards, its views, and the propose/validate/accept and setup/capture
-  workflows through its jobs;
+- the web server's request guards, its views, scoped views, the read-only export, and the
+  propose/validate/accept and setup/capture workflows through its jobs;
 - the LLM tool loop against a fake client.
 
 ## License

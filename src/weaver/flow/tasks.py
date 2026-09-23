@@ -549,7 +549,8 @@ class TaskModel:
                 )
             return "established", pos + [f"assumption: {a}" for a in self.assumptions[:3]], []
         status = "violated" if any(s == "violated" for s, _ in neg) else "unresolved"
-        return status, [], [t for _, t in neg]
+        # the writes that decide the verdict come first: callers show only the first few
+        return status, [], [t for _, t in sorted(neg, key=lambda x: x[0] != "violated")]
 
     def _name(self, oid: int) -> str:
         d = self.fe.describe(oid) if self.fe else {"kind": "object"}
