@@ -79,3 +79,37 @@ def test_elf_symbol_sizes(tmp_path):
     assert sizes["a"] == 7 and sizes["b"] == 1 and sizes["c"] == 16
     (tmp_path / "x.txt").write_text("not elf")
     assert symbol_sizes(tmp_path / "x.txt") is None
+
+
+DOC_HEADER = """\
+/**
+ * \\brief Adds one.
+ * \\param[in] q  the value, never written
+ * \\return one more than *q
+ */
+int doc_add(const int *q);
+"""
+
+
+@needs_clang
+def test_doc_comments_are_dropped_without_losing_locations(tmp_path):
+    """Doxygen comments become no Nodes, and locations after them still resolve."""
+    (tmp_path / "d.h").write_text(DOC_HEADER)
+    src = '#include "d.h"\nint doc_add(const int *q) { return *q + 1; }\nint after(int *r) { return *r; }\n'
+    (tmp_path / "u.c").write_text(src)
+    out = tmp_path / "u.ast.json"
+    with open(out, "wb") as f:
+        subprocess.run(
+            ["clang", "-fsyntax-only", "-Xclang", "-ast-dump=json", "u.c"], cwd=tmp_path, stdout=f, check=True
+        )
+    assert b"FullComment" in out.read_bytes()  # the dump carries the comment
+    tu = TranslationUnit(out, str(tmp_path), str(tmp_path / "u.c"), str(tmp_path))
+    assert not any(n.kind.endswith("Comment") for n in tu.all_nodes())
+    text = (tmp_path / "u.c").read_bytes()
+    for n in (x for x in tu.all_nodes() if x.kind == "DeclRefExpr"):
+        f, s, e = n.file_span()
+        assert f.endswith("u.c") and text[s:e] == (n.raw["referencedDecl"]["name"]).encode()
+    decl = next(
+        n for n in tu.top if n.kind == "FunctionDecl" and n.name == "doc_add" and n.loc.file_loc.file.endswith("d.h")
+    )
+    assert decl.loc.file_loc.line == 6  # the prototype after the comment block

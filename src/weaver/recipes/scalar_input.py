@@ -24,6 +24,7 @@ change together in one transaction.
 from __future__ import annotations
 
 import os
+from pathlib import Path
 from typing import Any
 
 from weaver.analysis.uses import describe_use_parts
@@ -509,7 +510,7 @@ class ScalarInputRecipe(Recipe):
                 "analyse the configuration that compiles them, or remove the stale reference",
             )
         for rel in self._asm_files(ctx):
-            if fname in ctx.lexed(rel).text:
+            if fname in Path(ctx.abs(rel)).read_text(errors="replace"):
                 pre.fail(UNRESOLVED, f"assembly file {rel} mentions {fname}")
         for status, msg in self._link_problems(ctx, fname, list(fsum.get("units", [])), bool(fsum["static"])):
             pre.fail(status, msg, "link only analysed objects, or declare the program and its entry points")

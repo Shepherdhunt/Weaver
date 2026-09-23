@@ -86,7 +86,7 @@ IDENT_CONT = IDENT_START | set("0123456789")
 STRING_PREFIXES = ("u8", "u", "U", "L")
 
 
-@dataclass
+@dataclass(slots=True)
 class Token:
     kind: str  # ident | number | string | char | punct | header | other
     text: str
@@ -100,7 +100,7 @@ class Token:
         return self.directive is not None
 
 
-@dataclass
+@dataclass(slots=True)
 class Directive:
     name: str
     start: int  # offset of '#'

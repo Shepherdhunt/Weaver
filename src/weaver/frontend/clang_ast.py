@@ -21,7 +21,7 @@ from typing import Any, Iterator
 from weaver.util import read_json
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class Loc:
     file: str | None
     line: int | None
@@ -65,6 +65,15 @@ class _LocResolver:
         self.last_file: str | None = None
         self.last_line: int | None = None
         self._cache: dict[str, str] = {}
+        # One Loc object per distinct location: parents and children, and the begin and end of short
+        # ranges, share locations, so this removes most Loc objects from a large AST.
+        self._locs: dict[tuple[Any, ...], Loc] = {}
+
+    def _intern(self, key: tuple[Any, ...], make: Any) -> Loc:
+        loc = self._locs.get(key)
+        if loc is None:
+            loc = self._locs[key] = make()
+        return loc
 
     def _abs(self, f: str) -> str:
         r = self._cache.get(f)
@@ -83,14 +92,15 @@ class _LocResolver:
             self.last_file = self._abs(d["file"])
         if "line" in d:
             self.last_line = d["line"]
-        return Loc(
+        key = (
             self.last_file,
             self.last_line,
             d.get("col"),
             d["offset"],
             d.get("tokLen"),
-            macro_arg=bool(d.get("isMacroArgExpansion")),
+            bool(d.get("isMacroArgExpansion")),
         )
+        return self._intern(key, lambda: Loc(*key[:5], macro_arg=key[5]))
 
     def loc(self, d: dict[str, Any] | None) -> Loc:
         if not d:
@@ -107,9 +117,15 @@ class _LocResolver:
             ):
                 # an argument of a transparent secondary-only wrapper (see frontend.wrappers)
                 self.unwrapped += 1
-                return Loc(sp.file, sp.line, sp.col, sp.offset, sp.tok_len)
-            return Loc(
-                ex.file, ex.line, ex.col, ex.offset, ex.tok_len, spelling=sp, expansion=ex, macro_arg=ex.macro_arg
+                return self._intern(
+                    ("plain", sp.file, sp.line, sp.col, sp.offset, sp.tok_len),
+                    lambda: Loc(sp.file, sp.line, sp.col, sp.offset, sp.tok_len),
+                )
+            return self._intern(
+                ("macro", sp, ex),
+                lambda: Loc(
+                    ex.file, ex.line, ex.col, ex.offset, ex.tok_len, spelling=sp, expansion=ex, macro_arg=ex.macro_arg
+                ),
             )
         return self.bare(d)
 
@@ -277,7 +293,8 @@ class TranslationUnit:
 
     def _build(self, raw: dict[str, Any], parent: Node | None, index: int, res: _LocResolver) -> Node:
         node = Node(raw, parent, index)
-        # Emission order within a node: loc, range(begin, end), then the rest.
+        # Emission order within a node: loc, range(begin, end), then the rest.  The resolved
+        # locations replace the raw "loc" and "range" dicts, which are dropped afterwards.
         for key, val in raw.items():
             if key == "loc":
                 node.loc = res.loc(val)
@@ -286,7 +303,14 @@ class TranslationUnit:
                 node.end = res.loc(val.get("end"))
             elif key == "inner" and isinstance(val, list):
                 for j, c in enumerate(val):
-                    if isinstance(c, dict) and c:
+                    if isinstance(c, dict) and c and c.get("kind", "").endswith("Comment"):
+                        # Documentation comments (Doxygen in cFS headers: three quarters of all nodes)
+                        # are never read.  Their locations still advance the resolver's elided
+                        # file/line state; then they are released.
+                        _consume_locs(c, res)
+                        val[j] = None
+                        node.children.append(None)
+                    elif isinstance(c, dict) and c:
                         node.children.append(self._build(c, node, j, res))
                     else:
                         node.children.append(None)
@@ -296,6 +320,8 @@ class TranslationUnit:
                 for v in val:
                     if isinstance(v, dict):
                         _consume_locs(v, res)
+        raw.pop("loc", None)
+        raw.pop("range", None)
         if node.id:
             self.nodes[node.id] = node
             if raw.get("kind", "").endswith("Decl"):

@@ -109,7 +109,7 @@ class RecipeContext:
         # Parsed ASTs, least recently used first.  Bounded: a whole-program evaluation visits findings
         # file by file, and keeping every unit's AST alive costs gigabytes on projects the size of cFS.
         self._tus: collections.OrderedDict[str, TranslationUnit | None] = collections.OrderedDict()
-        self._lex: dict[str, LexResult] = {}
+        self._lex: collections.OrderedDict[str, LexResult] = collections.OrderedDict()
         self._manifests: dict[str, dict[str, Any]] = {}
         self._macros: dict[str, dict[str, str]] = {}
         self.min_evidence = EvidenceStatus(project.acceptance.min_evidence)
@@ -154,26 +154,30 @@ class RecipeContext:
             self._macros[uid] = read_macros(d / name)
         return self._macros[uid]
 
+    LEX_CACHE = 64
+
     def lexed(self, rel: str) -> LexResult:
-        if rel not in self._lex:
-            self._lex[rel] = lex(Path(self.abs(rel)).read_bytes())
-        return self._lex[rel]
+        if rel in self._lex:
+            self._lex.move_to_end(rel)
+            return self._lex[rel]
+        lx = self._lex[rel] = lex(Path(self.abs(rel)).read_bytes())
+        while len(self._lex) > self.LEX_CACHE:
+            self._lex.popitem(last=False)
+        return lx
 
     def ident_occurrences(self, name: str, files: list[str]) -> list[tuple[str, int]]:
-        """(file, token index) of every identifier token ``name`` in ``files`` (index built once per file)."""
-        if not hasattr(self, "_ident_index"):
-            self._ident_index: dict[str, dict[str, list[int]]] = {}
+        """(file, token index) of every identifier token ``name`` in ``files``.
+
+        Which files mention a name comes from a compact, disk-cached index; only those files are
+        lexed in full (see ``weaver.analysis.identindex``).
+        """
+        if not hasattr(self, "_idents"):
+            from weaver.analysis.identindex import IdentIndex
+
+            self._idents = IdentIndex(self.root, self.store.root / "analysis" / "idents.json")
         out: list[tuple[str, int]] = []
-        for rel in files:
-            idx = self._ident_index.get(rel)
-            if idx is None:
-                idx = {}
-                if os.path.exists(self.abs(rel)):
-                    for i, t in enumerate(self.lexed(rel).tokens):
-                        if t.kind == "ident":
-                            idx.setdefault(t.text, []).append(i)
-                self._ident_index[rel] = idx
-            out.extend((rel, i) for i in idx.get(name, []))
+        for rel in self._idents.files_with(name, files):
+            out.extend((rel, i) for i, t in enumerate(self.lexed(rel).tokens) if t.kind == "ident" and t.text == name)
         return out
 
     def current_hash(self, rel: str) -> str:
