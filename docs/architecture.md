@@ -133,6 +133,7 @@ Task ownership and scale make the interface recipes usable on multi-task program
 | `report.py` | tracker roadmap | `weaver report`: inventory and rejection report for a scope of the project. |
 | `flow/tasks.py` | tracker §5 | Task model: declared threads of control checked against thread starts and entry points, per-context write summaries, thread-escape analysis, and the concurrent-writer query behind `weaver tasks` and `SI.no-concurrent-writers`. |
 | `analysis/identindex.py` | tracker §§3, 9 | Identifier-to-files index for whole-tree textual reference scans, cached on disk by path, size and modification time. |
+| `recipes/output_param.py` | tracker roadmap | Output parameter → return value: the void and status (result record) forms, a definitely-assigned analysis with null-test folding, private-target checks at every call, and call-site rewriting for statements, assignments, declarations and returns. |
 | `risk.py` | — | Pointer risk: factors from uses, points-to targets, recipe verdicts and evidence status, their weights and evidence; scores, levels and totals per function, file and module. |
 | `simplify.py` | tracker roadmap | The simplification checker: rule catalogue, target profiles (CLite provisional, no pointers, modular redesign, project-defined), and each function's remaining constructs from the inventory's pointer operations, calls, writes and per-function AST constructs. |
 | `web/export.py` | — | `weaver export-ui`: records the interface's read-only answers (optionally for a scope) into one HTML page that needs no server. |
@@ -322,6 +323,27 @@ They also get the same evidence slice and the same read-only tools. An answer mi
 flagged, and the transcript records the provider, model and guide version. The feature is off
 unless the project enables it. Keys stay in the environment or in a per-user file outside the
 project, and plain HTTP is allowed only to a server on the same machine.
+
+**An output parameter becomes a return value only when its target is private.** Moving a write
+from inside a call to just after it is invisible exactly when nothing else can observe the target
+during the call. The recipe requires every caller to pass `&x` where `x` is a whole automatic
+variable whose address is taken nowhere else in the caller: by pointer provenance no other code or
+thread can reach it, so no may-modify, may-read or task analysis is needed. Inside the callee the
+parameter must be write-only, each write a whole statement (so a returned expression never reads the
+value it is writing), and written on every path before every return. Null tests of the parameter can
+never succeed and are folded; a return in a branch that the folding makes dead still returns the
+status, with the record's value left zero-initialised rather than reading an unset variable. For
+a function that already returns a status, the result record (`<name>_result_t`) is the only way to
+return both without a pointer; it needs value records, which CLite lists as provisional, and the
+candidate says so. Clang does not desugar the pointee of `uint32 *`, so the pointee is resolved
+through the typedefs of every unit that defines the function: a typedef can name a scalar in one
+configuration and a structure in another, and all of them must agree. A returned expression may use
+macros (`return CFE_SUCCESS;`). Only the `return` keyword and the `;` must be plain source text,
+and the AST's expression must lie between them. A caller that never reads its variable discards
+the output. The call drops the value (`(void)f(a);` or `s = f(a).status;`) and the variable's
+declaration goes with it. Assigning the value instead would leave a variable that is set but never
+used, which is an error under `-Werror`; validating on cFS caught exactly that. A variable that is
+also assigned elsewhere blocks the candidate, since removing it would need dead-store elimination.
 
 **Risk is a transparent ordering, not a prediction.** Each factor is a fact Weaver already
 establishes (a cast to an integer, pointer arithmetic, an unknown or heap target, a concurrent

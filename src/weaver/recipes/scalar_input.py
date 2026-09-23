@@ -84,6 +84,23 @@ def _is_scalar(t: Any) -> bool:
     return bool(words) and all(w in SCALAR_WORDS for w in words)
 
 
+def param_types(ctx: RecipeContext, finding: dict[str, Any], units: list[dict[str, Any]]) -> list[tuple[Any, Any]]:
+    """The parameter's pointer type and its pointee, in each unit that defines the function.
+
+    Clang does not desugar the pointee of ``uint32 *``, so a typedef'd pointee is resolved
+    through the typedefs of each defining unit: a typedef may name a scalar in one
+    configuration and a structure in another, and every configuration must agree.
+    """
+    maps = [tu.typedefs for tu in (ctx.tu(u) for u in units) if tu is not None] or [{}]
+    t = safe_parse(finding.get("canonical_type") or finding.get("type"))
+    out: dict[tuple[str | None, str | None], tuple[Any, Any]] = {}
+    for m in maps:
+        pt = resolve_typedefs(t, m)
+        pointee = resolve_typedefs(pt.inner, m) if pt is not None and pt.kind == "pointer" else None
+        out.setdefault((pt and pt.spell(), pointee and pointee.spell()), (pt, pointee))
+    return list(out.values())
+
+
 def _unconditional_read(fn: Node, param: Node, tu: TranslationUnit) -> tuple[bool, str]:
     """Is ``*param`` read on every path from entry (before any possible exit)?"""
     from weaver.analysis.uses import classify_ref
@@ -229,23 +246,22 @@ class ScalarInputRecipe(Recipe):
                 pos("program", f"all {len(inv['units'])} unit(s) of {len(ctx.project.profiles)} profile(s) analysed")
 
         # -- parameter type -------------------------------------------------------
-        pt = resolve_typedefs(safe_parse(finding.get("canonical_type") or finding.get("type")), {})
-        if pt is None or pt.kind != "pointer":
-            P["type"].fail(UNRESOLVED, f"type {finding.get('type')!r} not recognised as a pointer")
-        else:
-            pointee = pt.inner
+        defining_units = [u for u in inv["units"] if u["unit_id"] in set(fsum.get("units", []))]
+        pointee = None
+        for pt, pointee in param_types(ctx, finding, defining_units):
+            if pt is None or pt.kind != "pointer":
+                P["type"].fail(UNRESOLVED, f"type {finding.get('type')!r} not recognised as a pointer")
+                continue
             if finding.get("typedef_hidden"):
                 P["type"].fail(VIOLATED, "the pointer is hidden behind a typedef; its declarator cannot be edited")
-            if pointee is not None and pointee.kind == "base" and not _is_scalar(pointee):
-                P["type"].fail(VIOLATED, f"pointee '{pointee.spell()}' is not a scalar type")
-            elif pointee is not None and pointee.kind != "base":
-                P["type"].fail(VIOLATED, f"pointee '{pointee.spell()}' is not a scalar type")
-            if pointee is not None and ("volatile" in pointee.quals or pointee.atomic):
+            if not _is_scalar(pointee):
+                P["type"].fail(VIOLATED, f"pointee '{pt.inner.spell()}' is not a scalar type")
+            elif "volatile" in pointee.quals or pointee.atomic:
                 P["type"].fail(VIOLATED, "accesses through the pointer are volatile or atomic")
             if "volatile" in pt.quals:
                 P["type"].fail(VIOLATED, "the pointer object itself is volatile")
-            if P["type"].status == ESTABLISHED:
-                pos("type", f"'{finding.get('type')}': pointer to scalar '{pointee.spell() if pointee else '?'}'")
+        if P["type"].status == ESTABLISHED and pointee is not None:
+            pos("type", f"'{finding.get('type')}': pointer to scalar '{pointee.spell()}'")
 
         # -- uses inside the function ----------------------------------------------
         uses = finding.get("uses", [])
@@ -261,7 +277,6 @@ class ScalarInputRecipe(Recipe):
             pos("uses", f"{len(uses)} use(s), all reads: " + ", ".join(f"line {u['line']}" for u in uses))
 
         # -- unconditional read (structural, per configuration) ------------------------
-        defining_units = [u for u in inv["units"] if u["unit_id"] in set(fsum.get("units", []))]
         for u in defining_units:
             tu = ctx.tu(u)
             if tu is None:

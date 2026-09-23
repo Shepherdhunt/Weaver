@@ -196,10 +196,24 @@ Done:
 - AI explanations: on/off per project, bring-your-own key, one shared guide for every provider.
 - SVF and GCC evidence side by side in the interface.
 - The simplification checker with target profiles (`weaver simplify`, the Simplify tab).
-
 - The risk view and risk report (`weaver risk`, the Risk tab, colour by risk on the Map).
+- The output-parameter recipe (`output-param`: void and status forms). On cFS, 3 of 146 candidates
+  are eligible. `CFE_TBL_TxnOpenTableLoadFile` (status form) and `UT_ObjIdDecompose` (void form)
+  both pass validation: every affected unit compiles, the mechanical re-check and full build pass,
+  and the same 112 ctest tests pass before and after the change. The first validation of
+  `UT_ObjIdDecompose` failed, and that failure is how the discarded-output case was found.
 
 Next:
 
-1. The output-parameter recipe.
-2. Several projects per server; `weaver doctor` and the container image.
+1. Several projects per server; `weaver doctor` and the container image.
+2. Widen `output-param` along its measured cFS blockers (146 candidates, 3 eligible; one
+   candidate usually fails several preconditions):
+   - add the unit-test build as a profile. Tests and applications outside the analysed build
+     reference 125 of the functions, and the recipe will not change a signature whose callers it
+     cannot rewrite;
+   - an "optional output" form for the 74 functions that return an error before writing the output.
+     The record says whether the value was written, and the caller keeps its old value when it was
+     not;
+   - convert leaf-first. 59 calls forward the caller's own pointer parameter (or pass a structure
+     member); once the callee returns a value, the caller's parameter becomes a candidate in turn;
+   - an in-out recipe for the 22 parameters that are read as well as written.

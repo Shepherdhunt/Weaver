@@ -124,12 +124,21 @@ class LexResult:
     def line_of(self, offset: int) -> int:
         return bisect.bisect_right(self.line_starts, offset)
 
-    def tokens_in(self, start: int, end: int) -> list[Token]:
-        """Tokens lying entirely within [start, end)."""
+    def _token_starts(self) -> list[int]:
         starts = self.__dict__.get("_starts")
         if starts is None:
             starts = self.__dict__["_starts"] = [t.start for t in self.tokens]
-        i = bisect.bisect_left(starts, start)
+        return starts
+
+    def index_at(self, offset: int) -> int | None:
+        """Index of the token starting exactly at ``offset``."""
+        starts = self._token_starts()
+        i = bisect.bisect_left(starts, offset)
+        return i if i < len(starts) and starts[i] == offset else None
+
+    def tokens_in(self, start: int, end: int) -> list[Token]:
+        """Tokens lying entirely within [start, end)."""
+        i = bisect.bisect_left(self._token_starts(), start)
         out = []
         while i < len(self.tokens) and self.tokens[i].start < end:
             if self.tokens[i].end <= end:
