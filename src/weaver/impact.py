@@ -609,11 +609,11 @@ def _transaction_overlaps(project: Project, base: dict[str, Any], changed: dict[
             continue
         post = (t.get("acceptance") or {}).get("post_hashes", {})
         strength = (t.get("acceptance") or {}).get("strength")
-        weak = (
-            "; it was accepted on compile and re-check evidence only, so no test has ever exercised it"
-            if strength == "compile-only"
-            else ""
-        )
+        weak = {
+            "compile-only": "; it was accepted on compile and re-check evidence only, so no test has ever exercised it",
+            "unexercised": "; when it was accepted, no test executed its changed lines",
+            "partly-exercised": "; when it was accepted, the tests did not execute all of its changed lines",
+        }.get(strength or "", "")
         for rel, h in post.items():
             if rel not in changed:
                 continue

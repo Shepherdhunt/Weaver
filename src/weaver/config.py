@@ -65,6 +65,7 @@ class ValidationSpec:
     build: CommandSpec | None = None
     tests: list[CommandSpec] = field(default_factory=list)
     compare: list[CommandSpec] = field(default_factory=list)
+    coverage: bool = True  # also measure which changed lines the tests execute (weaver.coverage)
 
 
 @dataclass
@@ -293,6 +294,7 @@ def load_project(path: str | os.PathLike[str] | None = None) -> Project:
             build=CommandSpec.parse(val["build"], "build") if val.get("build") else None,
             tests=[CommandSpec.parse(t, f"test{j}") for j, t in enumerate(val.get("tests") or [])],
             compare=[CommandSpec.parse(t, f"compare{j}") for j, t in enumerate(val.get("compare") or [])],
+            coverage=bool(val.get("coverage", True)),
         )
         cap = pr.get("capture")
         capture = None
@@ -462,4 +464,5 @@ profiles:
       # build: {{run: [make, -C, "{{workspace}}"], cwd: "{{workspace}}"}}
       # tests:   [{{name: unit, run: ["./build/tests"], cwd: "{{workspace}}"}}]
       # compare: [{{name: demo, run: ["./build/demo"], cwd: "{{workspace}}"}}]
+      # coverage: false   # skip the second, instrumented build that shows which changed lines the tests run
 """

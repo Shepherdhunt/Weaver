@@ -320,7 +320,9 @@ async function openSettings() {
           h("button", { class: "btn small ghost", onclick: () => { p.tests.push({ name: `test${p.tests.length}`, run: "" }); render(); } }, "+ test")),
         h("div", { class: "field" }, h("label", { text: "Differential runs — exit status and stdout must be identical on both trees" }),
           p.compare.map((c) => cmdRow(p.compare, c, render)),
-          h("button", { class: "btn small ghost", onclick: () => { p.compare.push({ name: `compare${p.compare.length}`, run: "" }); render(); } }, "+ differential run")));
+          h("button", { class: "btn small ghost", onclick: () => { p.compare.push({ name: `compare${p.compare.length}`, run: "" }); render(); } }, "+ differential run")),
+        h("label", { class: "check" }, h("input", { type: "checkbox", checked: p.coverage !== false, onchange: (e) => { p.coverage = e.target.checked; } }),
+          " Measure which changed lines the tests execute (a second, instrumented build with --coverage; a change the tests never run is not called behavioural)"));
       const have = new Set(p.tests.map((t) => (t.run || "").split(" ")[0]));
       const sug = p.suggestions.filter((x) => !have.has(x.run.split(" ")[0]));
       if (sug.length) box.append(h("div", { class: "field" }, h("label", { text: "Detected in the project" }),
@@ -415,7 +417,7 @@ async function openSettings() {
           acceptance: { require: [...req], allow_provisional: prov.checked, min_evidence: minEv.value },
           ...(conc.value === "__tasks__" ? {} : { concurrency: conc.value || null }), flow: { backend: backend.value },
           ai: { enabled: aiEnabled.checked, drafts: aiDraftsBox.checked, provider: aiProvider.value, model: aiModel.value.trim(), base_url: aiUrl.value.trim() },
-          profiles: st.profiles.map((p) => ({ id: p.id, build: p.build || { run: "" }, tests: p.tests, compare: p.compare })),
+          profiles: st.profiles.map((p) => ({ id: p.id, build: p.build || { run: "" }, tests: p.tests, compare: p.compare, coverage: p.coverage !== false })),
         });
         close();
         toast("Settings saved" + (res.warnings.length ? " — " + res.warnings.join(" ") : ""), res.warnings.length ? 9000 : 3200);
@@ -1118,6 +1120,10 @@ function openTxn(t) {
       ...v.records.filter((r) => r.facts).flatMap(factsView),
       policy.length ? h("div", { class: "d-sub", text: `Acceptance policy requires: ${policy.join(", ")}` + (policy.some((k) => k.includes("test")) ? "" : " (tests are not required)") }) : null,
       v.judgement && v.judgement.reasons.length ? h("div", { class: "d-sub", text: "Judgement: " + v.judgement.reasons.join("; ") }) : null,
+      v.strength === "unexercised" ? h("div", { class: "banner" }, h("b", { text: "The tests never ran this change. " }),
+        "They passed, but executed none of the changed lines that have code, so they say nothing about it. Add a test that reaches it, or review the change as untested.") : null,
+      v.strength === "partly-exercised" ? h("div", { class: "banner" }, h("b", { text: "The tests ran only part of this change. " }),
+        (v.records.find((r) => r.kind === "coverage" && r.outcome !== "passed") || {}).detail || "") : null,
       v.strength === "compile-only" ? h("div", { class: "banner" }, h("b", { text: "Compile-only. " }),
         "The patch builds and its AST re-checks, but no test or differential run executed it. ",
         h("a", { href: "#", onclick: (e) => { e.preventDefault(); openSettings(); } }, "Configure tests")) : null,
@@ -1354,7 +1360,8 @@ async function renderLedger(v) {
     h("thead", {}, h("tr", {}, ["Transaction", "State", "Validated by", "Recipe", "Pointer", "Where", "Created"].map((t) => h("th", { text: t })))),
     h("tbody", {}, rows.slice().reverse().map((t) => h("tr", { class: "click", onclick: async () => { try { openTxn(await api("ledger/" + t.id)); } catch (e) { fail(e); } } },
       h("td", { class: "mono", text: t.id }), h("td", {}, h("span", { class: `state ${t.state}`, text: t.state })),
-      h("td", {}, t.strength ? h("span", { class: "tag" + (t.strength === "compile-only" ? " weak" : ""), text: t.strength === "compile-only" ? "compile only" : "tests" }) : ""),
+      h("td", {}, t.strength ? h("span", { class: "tag" + (t.strength === "behavioural" ? "" : " weak"),
+        text: { "compile-only": "compile only", unexercised: "tests missed the change", "partly-exercised": "tests ran part of it" }[t.strength] || "tests" }) : ""),
       h("td", { text: t.recipe === "patch" ? originLabel(t) : t.recipe }), h("td", { class: "mono", text: t.recipe === "patch" ? (t.title || t.finding.name) : t.finding.name }),
       h("td", { class: "mono", text: `${t.finding.file}:${t.finding.line} ${t.finding.function ? t.finding.function + "()" : ""}` }),
       h("td", { text: (t.created_at || "").replace("T", " ").replace("+00:00", "Z") }))))));

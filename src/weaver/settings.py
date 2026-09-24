@@ -78,6 +78,7 @@ def read_settings(project: Project) -> dict[str, Any]:
                 "build": _cmd(val["build"], "build") if val.get("build") else None,
                 "tests": [_cmd(t, f"test{j}") for j, t in enumerate(val.get("tests") or [])],
                 "compare": [_cmd(t, f"compare{j}") for j, t in enumerate(val.get("compare") or [])],
+                "coverage": bool(val.get("coverage", True)),
                 "capture_build": build,
                 "suggestions": detect_tests(project.root, build),
             }
@@ -221,6 +222,11 @@ def write_settings(project: Project, changes: dict[str, Any]) -> tuple[Project, 
                 val[key] = [_merge_cmd(c, old, f"{key}{i}") for i, c in enumerate(items)]
                 if not val[key]:
                     val.pop(key)
+        if "coverage" in pc:
+            if pc["coverage"]:
+                val.pop("coverage", None)  # on is the default
+            else:
+                val["coverage"] = False
         if (val.get("tests") or val.get("compare")) and not val.get("build"):
             warnings.append(
                 f"profile {pr['id']}: tests are configured without a validation build; they will run against "

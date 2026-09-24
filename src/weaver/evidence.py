@@ -51,6 +51,7 @@ class ValidationKind(str, Enum):
     MECHANICAL_RECHECK = "mechanical-recheck"
     TEST = "testing"
     DIFFERENTIAL_TEST = "differential-testing"
+    COVERAGE = "coverage"  # which changed lines the tests executed
     SANITIZER = "sanitizer"
     BOUNDED_CHECK = "bounded-check"
     PROOF = "proof-under-assumptions"

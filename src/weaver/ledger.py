@@ -244,8 +244,10 @@ class Ledger:
             "strength": val.get("strength", "compile-only"),
         }
         note = "patch applied; affected evidence is now stale and must be re-collected before the next selection"
-        if txn["acceptance"]["strength"] != "behavioural":
-            note += "; accepted without running the program (no test or differential run passed)"
+        from weaver.validate import WEAK
+
+        if txn["acceptance"]["strength"] in WEAK:
+            note += "; " + WEAK[txn["acceptance"]["strength"]]
         self.transition(txn, TxnState.ACCEPTED, note)
         return txn
 

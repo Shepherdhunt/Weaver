@@ -214,6 +214,11 @@ Done:
   `CFE_ES_StartPerfDataCmd` validates. `local-alias` refuses that pointer, because it is reached
   through `data->`. The re-check finds the pointer removed and nothing else changed, the full build
   passes, and the same 112 ctest tests pass before and after the change.
+- Coverage of the changed lines: a second, instrumented build runs the same tests and says which
+  changed lines they executed. A change they never ran is `unexercised` (or `partly-exercised`)
+  instead of `behavioural`, and `acceptance.require: [coverage]` makes it provisional. On cFS,
+  re-validating the `CmdPtr` patch showed that the ES unit tests executed all 4 changed lines that
+  carry code. gcov read the data through cFS's own CMake build, unchanged.
 - AI drafts (`weaver draft`, **Draft a change with AI**, behind `ai.drafts`): the model drafts a patch
   under its own guide. Weaver applies it by content and asks once more if it does not apply, then
   proposes it as a patch transaction under the same checks. Nothing is applied until the draft
@@ -297,7 +302,7 @@ In rough order of value:
    the configured model drafts a change from the evidence slice under its own guide, and Weaver
    validates it like a manual patch. The model proposes; nothing is accepted without the checks. This reuses the
    bring-your-own-key setup.
-3. **Coverage of the changed lines.** During validation, measure (gcov or llvm-cov) whether the
+3. **Coverage of the changed lines** (done: `validation.coverage`). During validation, measure (gcov or llvm-cov) whether the
    tests executed the edited lines, and say so on the card. A passing suite that never runs the
    changed function is weak evidence today, and the card should not call it behavioural.
 4. **A ratchet in CI.** `weaver check` fails a merge request that adds pointers, high-risk pointers

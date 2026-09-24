@@ -138,6 +138,7 @@ Task ownership and scale make the interface recipes usable on multi-task program
 | `simplify.py` | tracker roadmap | The simplification checker: rule catalogue, target profiles (CLite provisional, no pointers, modular redesign, project-defined), and each function's remaining constructs from the inventory's pointer operations, calls, writes and per-function AST constructs. |
 | `web/export.py` | — | `weaver export-ui`: records the interface's read-only answers (optionally for a scope) into one HTML page that needs no server. |
 | `testdetect.py`, `settings.py` | tracker §7 | Detecting a project's test commands (Make, CTest, Meson, scripts), and editing validation commands and the acceptance policy in `weaver.yaml` with a backup and reload check. |
+| `coverage.py` | tracker §7 | Coverage of the changed lines: compiler shims that add `--coverage` through `PATH`, a separate instrumented build of the patched tree running the same tests, gcov (JSON) or `llvm-cov gcov` readers, the changed lines that carry code, and the strengths `unexercised` and `partly-exercised` |
 | `patch.py` | — | Your own change as a transaction: unified diffs placed by content, edits bound to file hashes, `PATCH.*` checks at proposal, and the pointer-fact re-check (every affected unit analysed before and after, compared with change impact's rules; named pointers and contracts decide the outcome, everything else is listed for review) |
 | `llm/draft.py`, `data/draft_guide.md` | tracker §10 | AI drafts behind `ai.drafts`: the drafting guide, the evidence slice with the exact source of the function, its callers and declarations, diff extraction, one repair round, and the proposal as a patch transaction |
 
@@ -382,6 +383,20 @@ differential runs are the same as for a recipe, and so are acceptance, the check
 Diffs are placed by content: a hunk's context and removed lines must appear in the file, at the
 stated line or at the nearest place after the previous hunk (trailing blanks ignored). Context lines
 keep the file's own text, and new or deleted files stay outside Weaver.
+
+**A passing test says nothing about a change it never runs.** After the judged runs, validation
+builds the patched tree once more, in its own copy, through compiler shims placed first on `PATH`.
+The shims add `--coverage` to every compile and link. The same tests and differential commands run
+there, and gcov (JSON, with the compile directory) or `llvm-cov gcov` (text) reads the counts. Only
+the lines the patch replaced or inserted are considered, and of those only lines that carry code.
+The judged builds keep their production flags, so instrumentation never decides pass or fail, at the
+cost of one more build and test run per profile. A change none of whose lines ran is `unexercised`,
+one partly run is `partly-exercised`, and the ledger, the card and change impact say so; requiring
+`coverage` in the acceptance policy turns both into provisional results. When coverage cannot be
+measured (no tool, a build that names its compiler by absolute path, an instrumented build that does
+not link) the record says why and the strength stays as the runs alone establish it. A line counts as
+executed when any test ran it once, whatever that test checked: coverage shows what the tests reach,
+not that they check it.
 
 **An AI draft is a patch like any other.** The model gets a drafting guide of its own (the same for
 every provider), the evidence slice, and the exact current source of the declaring function, its

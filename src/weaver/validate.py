@@ -21,6 +21,8 @@ from typing import Any
 from weaver.capture.compdb import CompileCommand, load_compdb
 from weaver.capture.toolid import identify
 from weaver.config import Project
+from weaver.coverage import describe as describe_coverage
+from weaver.coverage import measure as measure_coverage
 from weaver.evidence import ValidationKind, ValidationOutcome
 from weaver.frontend.clang_ast import TranslationUnit
 from weaver.frontend.wrappers import unwrapper_for
@@ -409,6 +411,33 @@ def run_validation(project: Project, txn: dict[str, Any], keep: bool = False) ->
                 )
             )
 
+        # 4. which changed lines those runs executed (a separate instrumented build) --------------
+        if v.coverage and (v.tests or v.compare) and built["candidate"]:
+            mine = [r for r in records if r.get("profile") == prof.id and r["kind"] in BEHAVIOURAL_KINDS]
+            if any(r["outcome"] == ValidationOutcome.FAILED.value for r in mine):
+                records.append(
+                    _record(
+                        ValidationKind.COVERAGE,
+                        f"{prof.id}:changed lines",
+                        ValidationOutcome.NOT_EVALUATED,
+                        "not measured: the tests already failed",
+                        profile=prof.id,
+                    )  # fmt: skip
+                )
+            else:
+                cov = measure_coverage(project, prof, changes, wdir, make_workspace)
+                full = cov.get("measured") and cov["executed"] == cov["executable"]
+                records.append(
+                    _record(
+                        ValidationKind.COVERAGE,
+                        f"{prof.id}:changed lines",
+                        ValidationOutcome.PASSED if full else ValidationOutcome.NOT_EVALUATED,
+                        describe_coverage(cov),
+                        profile=prof.id,
+                        coverage=cov,
+                    )
+                )
+
     if not keep:
         shutil.rmtree(wdir, ignore_errors=True)
     return {
@@ -478,14 +507,40 @@ def _manifest_for(project: Project, profile_id: str, c: CompileCommand) -> dict[
 BEHAVIOURAL_KINDS = (ValidationKind.TEST.value, ValidationKind.DIFFERENTIAL_TEST.value)
 
 
-def validation_strength(records: list[dict[str, Any]]) -> str:
-    """``behavioural`` when a test or differential run passed; ``compile-only`` otherwise.
+STRENGTHS = ("behavioural", "partly-exercised", "unexercised", "compile-only")
+WEAK = {  # how an acceptance on weaker evidence is noted in the ledger
+    "compile-only": "accepted without running the program (no test or differential run passed)",
+    "unexercised": "accepted although the tests executed none of the changed lines",
+    "partly-exercised": "accepted although the tests did not execute every changed line",
+}
 
-    Compile checks and the mechanical re-check establish that the patch builds and
-    has the intended shape; only running the program says anything about behaviour.
+
+def validation_strength(records: list[dict[str, Any]]) -> str:
+    """How much the runs say about the change.
+
+    ``compile-only``: no test or differential run passed; compile checks and the
+    mechanical re-check establish only that the patch builds and has the intended
+    shape.  When one passed and coverage was measured, ``unexercised`` means the
+    runs executed none of the changed lines that have code, ``partly-exercised``
+    some of them; ``behavioural`` means all of them (or coverage was not measured,
+    which the coverage record says).
     """
     ok = any(r["kind"] in BEHAVIOURAL_KINDS and r["outcome"] == ValidationOutcome.PASSED.value for r in records)
-    return "behavioural" if ok else "compile-only"
+    if not ok:
+        return "compile-only"
+    executable: set[str] = set()
+    executed: set[str] = set()
+    for r in records:
+        cov = r.get("coverage") or {}
+        if r["kind"] == ValidationKind.COVERAGE.value and cov.get("measured"):
+            for rel, f in (cov.get("files") or {}).items():
+                executable |= {f"{rel}:{n}" for n in f["executable"]}
+                executed |= {f"{rel}:{n}" for n in f["executed"]}
+    if executable and not executed:
+        return "unexercised"
+    if executable - executed:
+        return "partly-exercised"
+    return "behavioural"
 
 
 def configured_strength(project: Project) -> dict[str, Any]:
@@ -501,6 +556,7 @@ def configured_strength(project: Project) -> dict[str, Any]:
             "build": bool(p.validation.build),
             "tests": len(p.validation.tests),
             "compare": len(p.validation.compare),
+            "coverage": p.validation.coverage and bool(p.validation.tests or p.validation.compare),
         }
         for p in project.profiles
     }
@@ -522,6 +578,13 @@ def configured_strength(project: Project) -> dict[str, Any]:
     else:
         level = "behavioural"
     for pid, r in runs.items():
+        if (r["tests"] or r["compare"]) and not r["coverage"]:
+            notes.append(
+                f"profile {pid}: which changed lines the tests execute is not measured (validation.coverage is off), "
+                "so a passing run may never have executed the change"
+            )
+        if r["coverage"] and not (shutil.which("gcov") or shutil.which("llvm-cov")):
+            notes.append(f"profile {pid}: coverage is on but neither gcov nor llvm-cov is installed")
         if (r["tests"] or r["compare"]) and not r["build"]:
             notes.append(
                 f"profile {pid}: tests run without a validation build; they see whatever the workspace copy already "
@@ -540,12 +603,14 @@ def judge(records: list[dict[str, Any]], require: list[str]) -> tuple[str, list[
         return TxnState.REJECTED.value, [f"{r['kind']} {r['name']}: {r['detail'][:300]}" for r in failed]
     for kind in require:
         mine = [r for r in records if r["kind"] == kind]
+        pending = [r for r in mine if r["outcome"] == ValidationOutcome.NOT_EVALUATED.value]
+        why = f": {pending[0]['name']}: {pending[0]['detail'][:200]}" if pending else ""
         if not mine:
             reasons.append(f"required '{kind}' validation was not configured or not run")
         elif not any(r["outcome"] == ValidationOutcome.PASSED.value for r in mine):
-            reasons.append(f"required '{kind}' validation could not be evaluated")
-        elif any(r["outcome"] == ValidationOutcome.NOT_EVALUATED.value for r in mine):
-            reasons.append(f"some '{kind}' validations could not be evaluated")
+            reasons.append(f"required '{kind}' validation could not be evaluated{why}")
+        elif pending:
+            reasons.append(f"some '{kind}' validations could not be evaluated{why}")
     if reasons:
         return TxnState.PROVISIONAL.value, reasons
     return TxnState.VALIDATED.value, []

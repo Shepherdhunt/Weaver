@@ -413,12 +413,17 @@ def cmd_accept(args: argparse.Namespace) -> int:
         print(f"note: validation listed {len(review)} change(s) to pointer facts for review:", file=sys.stderr)
         for x in review[:20]:
             print(f"  [{x['severity']}] {x.get('name') or ''}: {x['text']}", file=sys.stderr)
-    if txn["acceptance"].get("strength") != "behavioural":
+    strength = txn["acceptance"].get("strength")
+    if strength == "compile-only":
         print(
             "warning: accepted on compile and re-check evidence only; no test or differential run passed. "
             "Configure tests under validation in weaver.yaml (or the web UI's settings) to check behaviour.",
             file=sys.stderr,
         )
+    elif strength in ("unexercised", "partly-exercised"):
+        cov = next((r for r in txn["validation"]["records"] if r["kind"] == "coverage"), {})
+        what = "never ran" if strength == "unexercised" else "did not run all of"
+        print(f"warning: accepted although the tests {what} the change: {cov.get('detail', '')}", file=sys.stderr)
     return 0
 
 
@@ -459,10 +464,11 @@ def cmd_ledger(args: argparse.Namespace) -> int:
         return 0
     for t in led.all():
         f = t["finding"]
-        weak = (t.get("acceptance") or {}).get("strength") == "compile-only"
+        strength = (t.get("acceptance") or {}).get("strength")
+        weak = strength in ("compile-only", "unexercised", "partly-exercised")
         print(
             f"{t['id']}  {t['state']:<11} {t['recipe']:<12} {t['finding_id']:<14} {f.get('file')}:{f.get('line')} "
-            f"{f.get('function')}() '{f.get('name')}'  {t['created_at']}" + ("  [compile-only]" if weak else "")
+            f"{f.get('function')}() '{f.get('name')}'  {t['created_at']}" + (f"  [{strength}]" if weak else "")
         )
     return 0
 

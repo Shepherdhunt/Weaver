@@ -128,11 +128,26 @@ def render_card(txn: dict[str, Any]) -> str:
                 "    strength: compile-only — the patch builds and re-checks, but no test or differential run "
                 "executed it; behaviour is not validated"
             )
+        elif strength == "unexercised":
+            add(
+                "    strength: unexercised — the tests passed on the patched tree but executed none of the changed "
+                "lines; they say nothing about this change"
+            )
+        elif strength == "partly-exercised":
+            add(
+                "    strength: partly-exercised — the tests passed on the patched tree but did not execute every "
+                "changed line (see the coverage record)"
+            )
         elif strength:
-            add(f"    strength: {strength} — a test or differential run passed on the patched tree")
+            measured = any((r.get("coverage") or {}).get("measured") for r in val["records"])
+            add(
+                f"    strength: {strength} — a test or differential run passed on the patched tree"
+                + ("" if measured else "; which changed lines it executed was not measured")
+            )
     add(
-        "    limits: testing and differential runs cover only the exercised inputs; the mechanical re-check "
-        "covers only the analysed configurations; no universal equivalence proof is claimed."
+        "    limits: testing and differential runs cover only the exercised inputs (a line counts as executed "
+        "when a test ran it once, whatever it checked); the mechanical re-check covers only the analysed "
+        "configurations; no universal equivalence proof is claimed."
     )
     for n in c.get("notes", []):
         add(f"    note: {n}")
