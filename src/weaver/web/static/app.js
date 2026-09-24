@@ -344,7 +344,8 @@ async function openSettings() {
   });
   const req = new Set(st.acceptance.require);
   const kindHelp = { compile: "patched units compile with the production compiler", "mechanical-recheck": "the patched AST satisfies the recipe's post-conditions",
-    testing: "configured tests pass (per test, against the baseline)", "differential-testing": "differential runs match the baseline" };
+    testing: "configured tests pass (per test, against the baseline)", "differential-testing": "differential runs match the baseline",
+    coverage: "the tests executed every changed line", configuration: "the validation build compiles what was analysed, with the same defines and dialect" };
   const policy = h("div", { class: "field" }, h("label", { text: "A transaction is validated only when these passed" }),
     st.kinds.map((k) => h("label", { class: "check" }, h("input", { type: "checkbox", checked: req.has(k), disabled: k === "compile",
       onchange: (e) => { e.target.checked ? req.add(k) : req.delete(k); } }), ` ${k} `, h("span", { class: "d-sub", text: kindHelp[k] || "" }))));
@@ -1157,6 +1158,9 @@ function openTxn(t) {
         "They passed, but executed none of the changed lines that have code, so they say nothing about it. Add a test that reaches it, or review the change as untested.") : null,
       v.strength === "partly-exercised" ? h("div", { class: "banner" }, h("b", { text: "The tests ran only part of this change. " }),
         (v.records.find((r) => r.kind === "coverage" && r.outcome !== "passed") || {}).detail || "") : null,
+      ...v.records.filter((r) => r.kind === "configuration" && r.outcome !== "passed").map((r) => h("div", { class: "banner" },
+        h("b", { text: "Validated with a different build. " }), r.detail.replace(/^the validation build differs from the analysed build: /, ""),
+        " Tests that pass there say less about the code Weaver analysed. See “Which build to capture” in docs/onboarding.md.")),
       v.strength === "compile-only" ? h("div", { class: "banner" }, h("b", { text: "Compile-only. " }),
         "The patch builds and its AST re-checks, but no test or differential run executed it. ",
         h("a", { href: "#", onclick: (e) => { e.preventDefault(); openSettings(); } }, "Configure tests")) : null,

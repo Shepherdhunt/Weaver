@@ -98,6 +98,12 @@ def cmd_doctor(args: argparse.Namespace) -> int:
         except ConfigError as e:
             if args.config or "no weaver.yaml found" not in str(e):
                 error = str(e)  # a project was named, or one exists but does not load
+    if args.build and project is not None:
+        from weaver import buildcheck
+
+        for prof in project.profiles:
+            if prof.validation.build is not None and prof.compile_commands.exists():
+                buildcheck.check_now(project, prof, log=lambda m: print(m, file=sys.stderr))
     res = doctor(project, error)
     res["machine_only"] = bool(args.machine)
     if args.json:
@@ -471,6 +477,10 @@ def cmd_accept(args: argparse.Namespace) -> int:
         cov = next((r for r in txn["validation"]["records"] if r["kind"] == "coverage"), {})
         what = "never ran" if strength == "unexercised" else "did not run all of"
         print(f"warning: accepted although the tests {what} the change: {cov.get('detail', '')}", file=sys.stderr)
+    for r in txn["validation"]["records"]:
+        if r["kind"] == "configuration" and r["outcome"] != "passed":
+            print(f"warning: validated with a build other than the one analysed ({r['name']}): {r['detail']}",
+                  file=sys.stderr)  # fmt: skip
     return 0
 
 
@@ -983,6 +993,11 @@ def build_parser() -> argparse.ArgumentParser:
 
     sp = add("doctor", cmd_doctor, "check that this machine and project have what Weaver needs, and say how to fix it")
     sp.add_argument("--machine", action="store_true", help="check this machine only, not the project")
+    sp.add_argument(
+        "--build",
+        action="store_true",
+        help="also run each profile's validation build once and compare what it compiles with what was analysed",
+    )
     sp.add_argument("--json", action="store_true")
 
     sp = add("probe", cmd_probe, "probe toolchain capabilities with a fixture")

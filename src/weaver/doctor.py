@@ -101,7 +101,8 @@ def install_hint(key: str, **fmt: str) -> str:
 def _platform() -> str:
     if sys.platform.startswith("linux"):
         rel = _os_release()
-        return f"Linux {platform.machine()}" + (f" ({rel['PRETTY_NAME']})" if rel.get("PRETTY_NAME") else "")
+        where = ", in the Weaver container" if os.environ.get("WEAVER_CONTAINER") == "1" else ""
+        return f"Linux {platform.machine()}" + (f" ({rel['PRETTY_NAME']}{where})" if rel.get("PRETTY_NAME") else where)
     if sys.platform == "darwin":
         return f"macOS {platform.mac_ver()[0]} {platform.machine()}"
     return f"{platform.system()} {platform.release()} {platform.machine()}"
@@ -517,6 +518,32 @@ def project_checks(project: Any, coverage: dict[str, str] | None = None) -> list
                         )
                     )
                     # fmt: skip
+        if v.build is not None:
+            from weaver import buildcheck
+
+            rec = buildcheck.last(project, prof)
+            if rec is None:
+                out.append(Check(ps, "build configuration", INFO,
+                                 "not compared yet with what was analysed (every validation compares it)",
+                                 "weaver doctor --build: runs the validation build once and compares"))  # fmt: skip
+            else:
+                res = rec.get("result") or {}
+                when = f" (checked {rec.get('at', '?')[:16].replace('T', ' ')}, {rec.get('source', '?')})"
+                stale = "" if buildcheck.is_current(project, prof, rec) else "; the build was captured again since"
+                status = OK if res.get("same") else WARN
+                out.append(
+                    Check(
+                        ps,
+                        "build configuration",
+                        status,
+                        buildcheck.describe(res) + when + stale,
+                        ""
+                        if status == OK
+                        else "make the validation build and the capture the same "
+                        "configuration (docs/onboarding.md, step 1), then: weaver doctor --build",
+                    )
+                )
+                # fmt: skip
         placeholders = [f"{k}={val}" for k, val in {**prof.target, **prof.platform}.items()
                         if isinstance(val, str) and val.startswith("recorded_")]  # fmt: skip
         if placeholders:

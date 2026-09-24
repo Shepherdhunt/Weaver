@@ -18,6 +18,7 @@ import time
 from pathlib import Path
 from typing import Any
 
+from weaver import buildcheck
 from weaver.capture.compdb import CompileCommand, load_compdb
 from weaver.capture.toolid import identify
 from weaver.config import Project
@@ -328,10 +329,33 @@ def run_validation(project: Project, txn: dict[str, Any], keep: bool = False) ->
         v = prof.validation
         built = {"baseline": True, "candidate": True}
         if v.build:
+            try:
+                analysed = load_compdb(prof.compile_commands)
+            except Exception:  # noqa: BLE001 - already reported by the per-unit compiles
+                analysed = None
             for label, ws in (("baseline", base_ws), ("candidate", cand_ws)):
                 argv, cwd, env = v.build.render(workspace=str(ws), root=str(project.root))
+                check = label == "baseline" and analysed is not None
+                if check:  # record what the build compiles: is it what was analysed?
+                    shim_env, check_log = buildcheck.build_env(
+                        project, prof, analysed, wdir / f"build-check-{prof.id}", env.get("PATH")
+                    )
+                    env = {**env, **shim_env}
                 r = run(argv, cwd=cwd, env=env, timeout=v.build.timeout)
                 built[label] = r.ok
+                if check and r.ok:
+                    res = buildcheck.compare(project, analysed, buildcheck.read_log(check_log), base_ws)
+                    buildcheck.save(project, prof, res, f"validation of {txn['id']}")
+                    records.append(
+                        _record(
+                            ValidationKind.CONFIGURATION,
+                            f"{prof.id}:build configuration",
+                            ValidationOutcome.PASSED if res["same"] else ValidationOutcome.NOT_EVALUATED,
+                            buildcheck.describe(res),
+                            profile=prof.id,
+                            configuration=res,
+                        )
+                    )
                 if label == "candidate":
                     records.append(
                         _record(

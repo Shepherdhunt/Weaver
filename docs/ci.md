@@ -84,6 +84,17 @@ pointer-ratchet:
     - weaver ratchet --base "origin/$CI_MERGE_REQUEST_TARGET_BRANCH_NAME"
 ```
 
+## With the container image
+
+The CI job needs the same compilers as the baseline, so that the counts can be compared. The Weaver
+image ([`container.md`](container.md)) pins them. Build the image once from your licensed Weaver
+checkout, then run each step in it, with the checkout mounted at the same path:
+
+```sh
+docker run --rm -v "$PWD:$PWD" -w "$PWD" weaver refresh --capture --no-flow
+docker run --rm -v "$PWD:$PWD" -w "$PWD" weaver ratchet --base origin/main --format github
+```
+
 ## Same evidence, same numbers
 
 A pointer's risk level depends on the evidence Weaver has. For example, points-to results can

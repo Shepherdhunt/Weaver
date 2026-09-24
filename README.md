@@ -42,6 +42,7 @@ can be accepted. The optional LLM explains and recommends; it never edits or val
 | **AI drafts** | A second switch, `ai.drafts`, on top of AI explanations. `weaver draft P-…` (or **Draft a change with AI**) asks the configured model for a patch that removes the pointer. The model receives its own drafting guide (the same for every provider), the evidence slice, and the exact source of the function, its callers and its declarations. If the draft does not apply, Weaver asks once more with the reason, then opens a transaction exactly as for your own change. Nothing is applied until the draft validates and you accept it. |
 | Transactions (tracker §6) | Candidate cards. States: discovered → analyzed → blocked / proposed → validated / provisional / rejected → accepted / skipped → reverted. Patches are bound to source hashes. Revert uses a three-way merge so later unrelated edits survive. |
 | Validation (tracker §7) | Isolated baseline and candidate workspaces. The production compiler rebuilds every unit whose main file *or included headers* were edited. A mechanical re-check parses the patched AST again. Configured builds, tests and differential comparisons run in both workspaces; CTest and Meson results are compared test by test, so a test that already fails on the baseline is not blamed on the patch. An acceptance policy judges the results. |
+| **Build configuration** | Validation records every compile of the unchanged tree's build through shims placed first on `PATH`, and compares it with the analysed compile commands. It reports sources no analysed configuration compiled, analysed sources it never compiles, and different defines, dialect, include paths, target flags or compiler. Each validation gets a `configuration` record, and a difference does not reject the change. The card, `weaver accept` and the interface say what differs; `acceptance.require: [configuration]` makes such a change provisional. `weaver doctor` shows the last comparison, and `weaver doctor --build` runs it on demand. On cJSON it names the 24 test and fuzzer sources and the `ENABLE_LOCALES` define that the Makefile capture missed. |
 | **Validation strength** | Each validation and acceptance records whether anything ran the patched program (`behavioural`) or not (`compile-only`), shown on the card, the ledger, impact reports and the web interface. **Coverage of the changed lines** (on by default when tests are configured): after the judged runs, a second build of the patched tree through compiler shims that add `--coverage` runs the same tests, and gcov or `llvm-cov` says which changed lines they executed. A change the tests never ran is `unexercised`, one they ran in part is `partly-exercised`; `acceptance.require: [coverage]` makes such a transaction provisional. `validation.coverage: false` turns the extra build off. `weaver tests` and the setup form detect the project's test commands (Make `test`/`check`, CTest, Meson, test scripts); the web settings editor changes validation commands and the acceptance policy. |
 | **Contracts on borrowed pointers** | `--expect borrowed`: the target is never written and the pointer is never kept past the call, checked through casts, copies and callees. The cFS software-bus buffer (`SBBufPtr`) holds through nine pointers in `sample_app`. |
 | **Risk view** | `weaver risk` and the **Risk** tab rank every pointer by the risk factors Weaver established for it: conversions to and from integers, concurrent writers (task model), unknown targets, pointer arithmetic, reinterpreting casts, escapes, writes, heap targets, globals, function pointers, many targets, reassignment, null tests, identity comparisons and weak evidence. Each factor has a weight and its evidence; the score orders the work (it is not a probability of failure). Totals per function, file and module; the Map can be coloured by risk; `weaver report` includes the top pointers. |
@@ -49,6 +50,7 @@ can be accepted. The optional LLM explains and recommends; it never edits or val
 | **Rejection report** | `weaver report --scope apps/sample_app`: evidence, pointers by class, each recipe's eligible and blocked candidates with the failing preconditions, the precondition that alone blocks the most, and contract status. |
 | **Change impact** | Snapshots of pointer facts (the working tree, or any git revision). `weaver impact` explains each pointer whose behavior changed since a snapshot, which edited line caused it, which recipe verdicts flipped, which pinned or transaction-implied contracts broke, and optionally whether builds and differential runs still agree. `weaver check` exits 1 on high risk, for CI. |
 | **CI ratchet** | `weaver ratchet` compares the analysis with a committed baseline (`weaver-ratchet.json`) and fails when a file gains pointers, high-risk pointers or violations of the chosen simplification profile, naming each new pointer. `--base origin/main` compares only the files a merge request changed; `--format github` annotates the pull request; `--update` locks in progress (or records a deliberate increase for review). Counts decide, so renames never fail it. Guide: [`docs/ci.md`](docs/ci.md). |
+| **Container image** | `Dockerfile`: Ubuntu 24.04 with Clang 18 (and its profile runtime), LLVM 18, GCC 13, binutils, Make, CMake, Ninja, Meson and git. SVF is a separate target (`--target svf`), and the `test` target runs the test suite in the image. `container/weaver-docker` runs it on the current project: mounted at the same path, run as the host user, the web interface published on the host's loopback only. Behind a TLS-inspecting proxy the build takes its CA as a secret. Guide: [`docs/container.md`](docs/container.md). |
 | **Setup check and onboarding** | `weaver doctor` (and **Check setup** in the interface) checks this machine and the project before a run. It compiles a few lines with each compiler: JSON AST, LTO, a coverage build. It also checks SVF, binutils, build tools, memory, disk and the clock, and the project's configuration: compile commands, the compilers they name, the AST reader of GCC profiles, validation, acceptance requirements that nothing configures, placeholders, shared objects with no program, concurrency, the AI key, and the analysis. Every problem comes with a fix for the platform (`apt`, `dnf` or `brew`). The step-by-step guide for a new repository is [`docs/onboarding.md`](docs/onboarding.md). |
 | **Web interface** | `weaver serve`: load or set up a project, compile, then explore a map of every pointer colored by what it does to its target. Graphs show points-to and call relationships, and a source view has inline marks. Refactors can be proposed, validated and accepted, contracts pinned, and change impact compared. `--scope` shows one subsystem of a large project. `weaver export-ui` records the interface as one read-only HTML page for sharing. |
 | **AI explanations** (tracker §10) | Off by default; switched on per project. Bring your own key: Claude through Anthropic's SDK, or any OpenAI-style Chat Completions server, hosted or local. One explanation guide (Weaver's vocabulary, evidence rules, eight fixed answer sections) is given to every provider, with the same focused evidence slice and read-only evidence tools; answers are checked against it. `weaver ai`, `weaver explain`. |
@@ -61,6 +63,17 @@ adapters (Diab, Green Hills). See
 [`docs/architecture.md`](docs/architecture.md).
 
 ## Install
+
+The container image has Weaver and every tool it drives, pinned: Clang 18 with its coverage runtime,
+GCC 13 with LTO, binutils, Make, CMake, Ninja, Meson and git. It needs only Docker. See
+[`docs/container.md`](docs/container.md).
+
+```sh
+docker build -t weaver .                      # or: --target svf -t weaver:svf, with SVF (AGPL)
+container/weaver-docker doctor                # run it on the project in the current directory
+```
+
+Or install it directly:
 
 ```sh
 pip install -e '.[flow]'    # Weaver with SVF points-to analysis (pysvf bundles LLVM and wpa; AGPL, see below)
@@ -174,6 +187,7 @@ New to a repository? Follow [`docs/onboarding.md`](docs/onboarding.md). The comm
 
 ```sh
 weaver doctor                                 # what this machine and project lack, and how to fix it
+weaver doctor --build                         # also: does the validation build compile what was analysed?
 weaver init                                   # write weaver.yaml; record profiles, target and platform facts
 weaver capture shim --tool gcc=/usr/bin/gcc   # a recording shim named like the compiler the build calls
 make clean && PATH=$PWD/.weaver/capture/shims:$PATH make   # the build's own flags are recorded
@@ -359,6 +373,10 @@ The end-to-end tests capture real builds of the fixture with Clang and GCC. They
 - your own change and AI drafts: diffs placed by content, blocked proposals that say why, a change
   that keeps its pointer or breaks a contract, one accepted and reverted with identical output; a
   draft that does not apply, is retried once and validates; a model that declines to patch;
+- the build configuration: which flags count (defines, dialect, includes, target; not warnings or
+  optimisation), sources on one side only, generated sources and build-system probes ignored,
+  the record in a real validation, the policy that requires it, the same build found equal, and a
+  compiler named by absolute path reported as not observed;
 - `weaver doctor`: a machine with no compilers, install hints per distribution, a project that
   cannot work (no compile commands, a required check nothing configures), a broken `weaver.yaml`, a
   GCC project that is ready and the same project without an AST reader, and the web route;

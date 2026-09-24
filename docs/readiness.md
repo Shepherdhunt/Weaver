@@ -3,7 +3,7 @@
 This is an assessment of Weaver as a product, as of September 2026. It rests on three kinds of
 evidence:
 
-- **The test suite.** 148 tests. The end-to-end tests capture and build real fixtures with GCC and
+- **The test suite.** 151 tests, passing on the host (Python 3.11) and inside the container image (Python 3.12). The end-to-end tests capture and build real fixtures with GCC and
   Clang.
 - **The cFS pilot.** cFE, OSAL, PSP and the sample app, with 3,343 pointer findings in the analysed
   build ([`pilots/cfs`](../pilots/cfs/README.md)).
@@ -115,8 +115,20 @@ Found but not fixed:
    configuration. Each problem comes with the install command for the platform. On this machine
    it found the missing Clang profile runtime at once.
    It is also in the web interface (**Check setup**).
-2. **A container image** with pinned Clang 18, GCC 13 and binutils, and SVF as an optional layer.
-   Linux playtesters then need Docker and nothing else.
+2. ~~**A container image.**~~ Done ([`container.md`](container.md)):
+   - Ubuntu 24.04 with Clang 18 and its coverage runtime, GCC 13 with LTO, binutils, Make, CMake,
+     Ninja, Meson and git;
+   - SVF as an optional target;
+   - a wrapper that mounts the project at the same path and runs as the host user.
+
+   Verified end to end:
+   - doctor inside the image reports 0 problems;
+   - the whole test suite passes inside the image (Python 3.12);
+   - cJSON's CMake build is captured through the wrapper (810 pointers, 57 s without SVF) and
+     validates in 19.5 s, with 22 CTest tests, 23 of 23 changed lines covered, and the build
+     configuration matching;
+   - it runs as a non-root user;
+   - the web interface is published on the host's loopback only.
 3. ~~**An onboarding guide for a repository.**~~ Done: [`onboarding.md`](onboarding.md). It was
    written from a run on cJSON's CMake build with its tests:
    - 27 units, all `secondary-checked`;
@@ -131,8 +143,14 @@ Found but not fixed:
    - when to declare programs (and when not);
    - effect models;
    - a table of symptoms and fixes.
-4. **A warning when the validation build differs from the analysed build**: different defines,
-   different dialect, or sources the analysis never saw.
+4. ~~**A warning when the validation build differs from the analysed build.**~~ Done. Every
+   validation records its build's compiles and compares them with the analysed commands. It
+   reports sources on one side only, and different defines, dialect, includes, target flags or
+   compiler. `weaver doctor --build` runs the comparison on demand.
+   - On cJSON's Makefile capture it names:
+     - the 24 test and fuzzer sources;
+     - `ENABLE_LOCALES` and the export defines that only the CMake validation build uses.
+   - On the CMake capture, all 27 sources are compiled as analysed.
 5. **A better `weaver init`**: ask for the build and test commands (`weaver tests` already detects
    them), and leave out placeholder facts.
 6. **Two more first runs by someone other than the author**: bare-metal firmware with a cross

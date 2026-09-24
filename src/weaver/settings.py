@@ -26,6 +26,8 @@ POLICY_KINDS = [
     ValidationKind.MECHANICAL_RECHECK.value,
     ValidationKind.TEST.value,
     ValidationKind.DIFFERENTIAL_TEST.value,
+    ValidationKind.COVERAGE.value,
+    ValidationKind.CONFIGURATION.value,
 ]
 EVIDENCE_LEVELS = ["primary", "secondary-checked", "secondary-partial"]
 

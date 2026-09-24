@@ -1,0 +1,37 @@
+#!/bin/sh
+# Run Weaver from its container on the project in the current directory.
+#
+#   weaver-docker doctor
+#   weaver-docker refresh --capture
+#   weaver-docker serve        # then open the printed link on this machine
+#
+# - The current directory is mounted at the same path inside, so the paths in .weaver/, in
+#   compile commands and in reports are the same inside and outside the container.
+# - Weaver runs as your user, so the files it writes are yours.
+# - AI keys stored with 'weaver ai key' live in your own config directory, mounted in.
+# - 'serve' publishes the web interface on this machine's loopback address only.
+#
+# WEAVER_IMAGE (default: weaver), WEAVER_PORT (default: 61847) and WEAVER_DOCKER_ARGS (extra
+# 'docker run' options, for example another -v for a toolchain outside the project) change this.
+set -eu
+image=${WEAVER_IMAGE:-weaver}
+port=${WEAVER_PORT:-61847}
+config=${WEAVER_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/weaver}
+mkdir -p "$config"
+publish=""
+if [ "${1:-}" = serve ]; then
+  shift
+  # inside the container it must listen beyond its own loopback; Docker publishes it on the host's only
+  set -- serve --host 0.0.0.0 --port "$port" "$@"
+  publish="-p 127.0.0.1:$port:$port"
+fi
+tty=""
+if [ -t 0 ] && [ -t 1 ]; then tty="-it"; fi
+# shellcheck disable=SC2086  # $tty, $publish and WEAVER_DOCKER_ARGS are lists of words
+exec docker run --rm $tty $publish \
+  --user "$(id -u):$(id -g)" \
+  -v "$PWD:$PWD" -w "$PWD" \
+  -v "$config:/home/weaver/.config/weaver" \
+  -e ANTHROPIC_API_KEY -e OPENAI_API_KEY \
+  ${WEAVER_DOCKER_ARGS:-} \
+  "$image" "$@"

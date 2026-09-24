@@ -18,6 +18,7 @@ from __future__ import annotations
 import errno
 import json
 import mimetypes
+import os
 import secrets
 import sys
 import threading
@@ -553,12 +554,22 @@ def serve(
 ) -> None:
     app = App(project_path, scope)
     httpd = make_server(app, host, port)
-    base = f"http://{'localhost' if host in ('127.0.0.1', '::1') else host}:{httpd.server_address[1]}/"
+    # In the Weaver container it listens on the container's interfaces, and Docker publishes the port on
+    # the host's loopback (container/weaver-docker): the link to open is on localhost.
+    container = os.environ.get("WEAVER_CONTAINER") == "1" and host in ("0.0.0.0", "::")
+    shown = "localhost" if host in ("127.0.0.1", "::1") or container else host
+    base = f"http://{shown}:{httpd.server_address[1]}/"
     url = f"{base}?token={app.token}"
     print(f"Weaver web interface on {base}  (Ctrl-C to stop)", flush=True)
     print("Open this link to sign in (keep it private; it changes on every start):", flush=True)
     print(f"  {url}", flush=True)
-    if host not in ("127.0.0.1", "localhost", "::1"):
+    if container:
+        print(
+            "In the container: publish this port on the host's loopback address only "
+            f"(weaver-docker does: -p 127.0.0.1:{httpd.server_address[1]}:{httpd.server_address[1]}).",
+            flush=True,
+        )
+    elif host not in ("127.0.0.1", "localhost", "::1"):
         print(
             "WARNING: listening beyond loopback; anyone who can reach this port and load the page can drive "
             "Weaver on this machine.",

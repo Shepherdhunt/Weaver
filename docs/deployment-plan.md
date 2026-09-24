@@ -67,9 +67,10 @@ Aim: Weaver installs on other machines without help and holds up on repositories
 
 1. **Packaging.**
    - A versioned wheel.
-   - A container image with pinned Clang 18, GCC 13 (with the LTO plugin), binutils, and SVF as
-     an optional layer. Publish the port only on the host's loopback:
-     `-p 127.0.0.1:61847:61847`.
+   - A container image (done: [`container.md`](container.md)) with pinned Clang 18, GCC 13 (with
+     the LTO plugin), binutils, and SVF as an optional target. `container/weaver-docker`
+     publishes the port only on the host's loopback (`-p 127.0.0.1:61847:61847`). Still to do:
+     publish it from a registry that requires sign-in.
    - Native installers later.
 2. **`weaver doctor`** (done). Checks compilers, the GCC LTO plugin, coverage builds, SVF, disk and
    memory, and the project's configuration, and says what is missing and how to install it.
@@ -246,13 +247,20 @@ Done:
   project's configuration, with a fix for each problem. The guide was written from cJSON's CMake
   build with its tests: 27 units, all `secondary-checked`, 810 pointers, and the eligible change
   validated against 22 CTest tests.
+- The container image ([`container.md`](container.md)) and the build-configuration check. The image
+  passes the whole test suite and runs cJSON end to end through `container/weaver-docker`. Every
+  validation now says whether its build compiles what was analysed, and `weaver doctor --build`
+  checks it on demand.
 
 Next:
 
-1. Before guided playtests (from [`readiness.md`](readiness.md)). `weaver doctor` and the onboarding
-   guide are done. Still to do:
+1. Before guided playtests (from [`readiness.md`](readiness.md)). Done:
+   - `weaver doctor`;
+   - the onboarding guide;
    - the container image;
-   - a warning when the validation build differs from the analysed build;
+   - the build-configuration check.
+
+   Still to do:
    - a better `weaver init`;
    - two more first runs by someone other than the author.
 

@@ -52,6 +52,7 @@ class ValidationKind(str, Enum):
     TEST = "testing"
     DIFFERENTIAL_TEST = "differential-testing"
     COVERAGE = "coverage"  # which changed lines the tests executed
+    CONFIGURATION = "configuration"  # the validation build compiles what was analysed, as analysed
     SANITIZER = "sanitizer"
     BOUNDED_CHECK = "bounded-check"
     PROOF = "proof-under-assumptions"

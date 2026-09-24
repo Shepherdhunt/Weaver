@@ -61,6 +61,12 @@ project's configuration.
 cross compilers Weaver should work, but they have not been piloted; tell us what you find. Windows
 needs WSL 2.
 
+**Or use the container.** It has every tool doctor checks for, already installed:
+Clang 18 with its coverage runtime, GCC 13 with LTO, binutils, Make, CMake, Ninja, Meson and git.
+With `container/weaver-docker`, every command in this guide works unchanged: write
+`weaver-docker refresh --capture` where the guide says `weaver refresh --capture`. See
+[`container.md`](container.md).
+
 ## 1. Choose the build to capture
 
 Weaver analyses what the compiler really builds. It records every compile and link of one real
@@ -78,6 +84,24 @@ can see.
     defines, a different `-std`, or sources the analysis never saw, it tests code Weaver did not
     analyse.
   - cJSON's Makefile leaves `ENABLE_LOCALES` off, and its CMake build turns it on.
+  - `weaver doctor --build` runs your validation build once and compares what it compiles with what
+    was analysed. Every validation compares it too (step 4).
+
+    On cJSON, the Makefile capture checked against the CMake validation build gives:
+
+    ```
+    warn  build configuration    the validation build differs from the analysed build: it compiles 24 source(s)
+                                 no analysed configuration compiled (fuzzing/cjson_read_fuzzer.c, ...), so the
+                                 tests run code Weaver never analysed; it compiles 3 analysed source(s)
+                                 differently: -DCJSON_API_VISIBILITY (3), -DCJSON_EXPORT_SYMBOLS (3),
+                                 -DENABLE_LOCALES (3), ... only in the validation build
+    ```
+
+    Captured from the CMake build instead, it gives:
+
+    ```
+    ok    build configuration    the validation build compiles the 27 analysed source(s) as analysed
+    ```
 - **Capture a full rebuild.** Clean first, so every unit is compiled while Weaver watches.
 - **Use one profile per configuration you ship.** Examples: a native build and a cross build, or
   two boards. Each is analysed separately, and a change must hold in all of them.
@@ -235,6 +259,17 @@ acceptance:
 Set `project.workspace_exclude` to your build directories and large generated files, so the
 workspaces copy only the sources.
 
+**The build configuration.**
+- Validation records every compile of the unchanged tree's build and compares it with the analysed
+  commands:
+  - sources that no analysed configuration compiled;
+  - analysed sources the validation build never compiles;
+  - different defines, dialect, include paths, target flags, or compiler.
+- A difference does not fail the change. The `configuration` record says what differs, the card and
+  `weaver accept` repeat it, and the web interface shows it as a banner.
+- `acceptance.require: [..., configuration]` makes such a change provisional instead.
+- Doctor shows the last comparison.
+
 ## 5. Declare concurrency
 
 A recipe that turns a pointer parameter into a value must know that nothing else writes the target
@@ -356,6 +391,8 @@ pointers or profile violations in the files it changes. See [`ci.md`](ci.md).
 | Validation says `unexercised` or `partly-exercised` | The tests do not run the changed lines | Add a test that runs them, or say so when accepting |
 | Coverage is `not measured` | The compiler cannot link a coverage build | See doctor's Coverage section (for Clang, the profile runtime package) |
 | The validation build fails where the unit compiles passed | Validation builds another configuration than the one captured | Make `validation.build` and the capture use the same configuration (step 1) |
+| `build configuration` warns, or a card says "validated with a different build" | The validation build compiles other sources or flags than the analysed build | Capture the build you validate with (step 1). Check with `weaver doctor --build`. |
+| `build configuration: not observed` | The validation build runs its compiler by absolute path, or found its objects already built | Name the compiler as the build calls it (`CC=gcc`, `-DCMAKE_C_COMPILER=gcc`), and exclude build outputs with `project.workspace_exclude` |
 | The web interface says a job failed | See the job log in the interface | Run the same step from the command line for the full output |
 
 ## The complete cJSON configuration
