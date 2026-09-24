@@ -138,6 +138,7 @@ Task ownership and scale make the interface recipes usable on multi-task program
 | `simplify.py` | tracker roadmap | The simplification checker: rule catalogue, target profiles (CLite provisional, no pointers, modular redesign, project-defined), and each function's remaining constructs from the inventory's pointer operations, calls, writes and per-function AST constructs. |
 | `web/export.py` | — | `weaver export-ui`: records the interface's read-only answers (optionally for a scope) into one HTML page that needs no server. |
 | `testdetect.py`, `settings.py` | tracker §7 | Detecting a project's test commands (Make, CTest, Meson, scripts), and editing validation commands and the acceptance policy in `weaver.yaml` with a backup and reload check. |
+| `ratchet.py` | — | The CI ratchet: per-file counts of pointers, high-risk pointers and profile violations against a committed baseline; changed-file scope from git; text, JSON and GitHub-annotation output |
 | `coverage.py` | tracker §7 | Coverage of the changed lines: compiler shims that add `--coverage` through `PATH`, a separate instrumented build of the patched tree running the same tests, gcov (JSON) or `llvm-cov gcov` readers, the changed lines that carry code, and the strengths `unexercised` and `partly-exercised` |
 | `patch.py` | — | Your own change as a transaction: unified diffs placed by content, edits bound to file hashes, `PATCH.*` checks at proposal, and the pointer-fact re-check (every affected unit analysed before and after, compared with change impact's rules; named pointers and contracts decide the outcome, everything else is listed for review) |
 | `llm/draft.py`, `data/draft_guide.md` | tracker §10 | AI drafts behind `ai.drafts`: the drafting guide, the evidence slice with the exact source of the function, its callers and declarations, diff extraction, one repair round, and the proposal as a patch transaction |
@@ -383,6 +384,15 @@ differential runs are the same as for a recipe, and so are acceptance, the check
 Diffs are placed by content: a hunk's context and removed lines must appear in the file, at the
 stated line or at the nearest place after the previous hunk (trailing blanks ignored). Context lines
 keep the file's own text, and new or deleted files stay outside Weaver.
+
+**The ratchet counts; it does not track identities.** A merge request must not leave a file with
+more pointers, more high-risk pointers or more violations of the chosen profile than the committed
+baseline records. Counts per file decide, because IDs follow names and functions: a rename would
+otherwise look like one pointer removed and a new one added. IDs are kept only to name what is new.
+Risk levels depend on the evidence (points-to results add or remove factors), so the baseline
+records whether points-to evidence was present. A mismatch skips the high-risk comparison with a
+warning rather than failing a build for a reason nobody can fix in the code. The baseline is a plain
+JSON file in the repository, so accepting an increase is itself a reviewed change.
 
 **A passing test says nothing about a change it never runs.** After the judged runs, validation
 builds the patched tree once more, in its own copy, through compiler shims placed first on `PATH`.

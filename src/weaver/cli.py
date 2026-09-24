@@ -390,6 +390,32 @@ def cmd_draft(args: argparse.Namespace) -> int:
     return 3
 
 
+def cmd_ratchet(args: argparse.Namespace) -> int:
+    from weaver.ratchet import ratchet, render_github, render_text
+
+    res, path = ratchet(
+        _project(args),
+        update=args.update,
+        base_rev=args.base,
+        profile=args.profile,
+        strict=args.strict,
+        log=lambda m: print(m, file=sys.stderr),
+    )
+    if args.update:
+        if args.format == "json":
+            _print_json(res)
+        else:
+            print(f"ratchet baseline written to {path}; commit it. Totals: {res['totals']}")
+        return 0
+    if args.format == "json":
+        _print_json(res)
+    elif args.format == "github":
+        print(render_github(res, path))
+    else:
+        print(render_text(res, path))
+    return 0 if res["ok"] else 1
+
+
 def cmd_validate(args: argparse.Namespace) -> int:
     from weaver.card import render_card
     from weaver.ledger import Ledger
@@ -1134,6 +1160,14 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("finding")
     sp.add_argument("--dry-run", action="store_true", help="print the request instead of sending it")
     sp.add_argument("--no-propose", action="store_true", help="print the draft instead of opening a transaction")
+
+    sp = add("ratchet", cmd_ratchet, "for CI: fail when pointers, high-risk pointers or profile violations go up")
+    sp.add_argument("--update", action="store_true", help="write the baseline from the current inventory")
+    sp.add_argument("--base", metavar="REV", help="compare only the files changed since this git revision")
+    sp.add_argument("--profile", help="simplification profile to count (default: ratchet.profile, the baseline's)")
+    sp.add_argument("--strict", action="store_true", help="also fail when the baseline could be tightened")
+    sp.add_argument("--format", choices=["text", "json", "github"], default="text",
+                    help="github: error annotations on the new pointers in a pull request")  # fmt: skip
 
     sp = add("auto", cmd_auto, "propose/validate/accept eligible candidates under the acceptance policy")
     sp.add_argument("--recipe", help="restrict to one recipe (default: all)")

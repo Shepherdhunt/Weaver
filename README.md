@@ -48,6 +48,7 @@ can be accepted. The optional LLM explains and recommends; it never edits or val
 | **Simplification checker** | `weaver simplify` and the **Simplify** tab: every analysed function against a target profile, listing each construct the target excludes with its line (pointers, addresses, pointer arithmetic, pointer/integer casts, function pointers, heap allocation, raw memory functions, `goto`, unions, variadic functions, recursion, `setjmp`/`longjmp`, inline assembly, global writes, static locals), and how many functions already meet it. Built-in profiles: CLite (provisional), no pointers, and ready for a modular redesign; projects adjust them or define their own. A guide for manual work, not a certification. |
 | **Rejection report** | `weaver report --scope apps/sample_app`: evidence, pointers by class, each recipe's eligible and blocked candidates with the failing preconditions, the precondition that alone blocks the most, and contract status. |
 | **Change impact** | Snapshots of pointer facts (the working tree, or any git revision). `weaver impact` explains each pointer whose behavior changed since a snapshot, which edited line caused it, which recipe verdicts flipped, which pinned or transaction-implied contracts broke, and optionally whether builds and differential runs still agree. `weaver check` exits 1 on high risk, for CI. |
+| **CI ratchet** | `weaver ratchet` compares the analysis with a committed baseline (`weaver-ratchet.json`) and fails when a file gains pointers, high-risk pointers or violations of the chosen simplification profile, naming each new pointer. `--base origin/main` compares only the files a merge request changed; `--format github` annotates the pull request; `--update` locks in progress (or records a deliberate increase for review). Counts decide, so renames never fail it. Guide: [`docs/ci.md`](docs/ci.md). |
 | **Web interface** | `weaver serve`: load or set up a project, compile, then explore a map of every pointer colored by what it does to its target. Graphs show points-to and call relationships, and a source view has inline marks. Refactors can be proposed, validated and accepted, contracts pinned, and change impact compared. `--scope` shows one subsystem of a large project. `weaver export-ui` records the interface as one read-only HTML page for sharing. |
 | **AI explanations** (tracker §10) | Off by default; switched on per project. Bring your own key: Claude through Anthropic's SDK, or any OpenAI-style Chat Completions server, hosted or local. One explanation guide (Weaver's vocabulary, evidence rules, eight fixed answer sections) is given to every provider, with the same focused evidence slice and read-only evidence tools; answers are checked against it. `weaver ai`, `weaver explain`. |
 
@@ -191,6 +192,8 @@ weaver revert T-0bb5fce6                      # undo an accepted transaction
 weaver auto --max 10                          # propose/validate/accept eligible candidates under the policy
 weaver auto --recipe output-param --max 20    # leaf-first: each conversion can make its caller eligible
 weaver patch change.diff --removes P-1a2b3c4d5e --title "…"   # your own change, checked like a recipe's
+weaver ratchet --update                       # write the CI baseline (commit weaver-ratchet.json)
+weaver ratchet --base origin/main             # in CI: fail if the changed files gained pointers
 weaver ai enable --drafts                     # also let the model draft patches (sends whole functions)
 weaver draft P-1a2b3c4d5e                     # an AI draft, proposed as a transaction; validate as usual
 
@@ -339,6 +342,9 @@ The end-to-end tests capture real builds of the fixture with Clang and GCC. They
   propose/validate/accept and setup/capture workflows through its jobs;
 - AI explanations: the Claude tool loop against a fake client, the OpenAI-compatible loop against a
   fake local server, the shared guide and its section check, the on/off switch and private key storage.
+- the CI ratchet: counts per file (renames do not fail it), new pointers and violations named,
+  progress locked in with `--update` and `--strict`, `--base` limited to changed files, stale
+  inventories refused;
 - coverage of the changed lines: a change the tests run, one they never run, one they run in part,
   the policy that requires it, and a build that cannot be measured;
 - your own change and AI drafts: diffs placed by content, blocked proposals that say why, a change

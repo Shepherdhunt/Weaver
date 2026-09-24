@@ -219,6 +219,8 @@ Done:
   instead of `behavioural`, and `acceptance.require: [coverage]` makes it provisional. On cFS,
   re-validating the `CmdPtr` patch showed that the ES unit tests executed all 4 changed lines that
   carry code. gcov read the data through cFS's own CMake build, unchanged.
+- The CI ratchet (`weaver ratchet`): per-file counts of pointers, high-risk pointers and profile
+  violations against a committed baseline, with GitHub annotations and a changed-files scope.
 - AI drafts (`weaver draft`, **Draft a change with AI**, behind `ai.drafts`): the model drafts a patch
   under its own guide. Weaver applies it by content and asks once more if it does not apply, then
   proposes it as a patch transaction under the same checks. Nothing is applied until the draft
@@ -305,7 +307,7 @@ In rough order of value:
 3. **Coverage of the changed lines** (done: `validation.coverage`). During validation, measure (gcov or llvm-cov) whether the
    tests executed the edited lines, and say so on the card. A passing suite that never runs the
    changed function is weak evidence today, and the card should not call it behavioural.
-4. **A ratchet in CI.** `weaver check` fails a merge request that adds pointers, high-risk pointers
+4. **A ratchet in CI** (done: `weaver ratchet`, guide in [`ci.md`](ci.md)). `weaver check` fails a merge request that adds pointers, high-risk pointers
    or profile violations in the files it touches. This keeps progress from eroding while teams
    migrate, and builds on snapshots and change impact.
 5. **Unit tests and stubs inside the program.** Analyse the unit-test build as a profile, and let a
