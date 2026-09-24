@@ -288,6 +288,10 @@ def route(app: App, method: str, path: str, q: dict[str, str], body: dict[str, A
         st["recent"] = app.recent
         st["running"] = [j.to_json() for j in app.jobs.values() if j.state == "running"]
         return st
+    if (method, head) == ("GET", "doctor"):
+        from weaver.doctor import doctor
+
+        return doctor(app.project)
     if (method, head) == ("POST", "open"):
         app.open(body["path"])
         return {"ok": True}

@@ -3,7 +3,7 @@
 This is an assessment of Weaver as a product, as of September 2026. It rests on three kinds of
 evidence:
 
-- **The test suite.** 142 tests. The end-to-end tests capture and build real fixtures with GCC and
+- **The test suite.** 148 tests. The end-to-end tests capture and build real fixtures with GCC and
   Clang.
 - **The cFS pilot.** cFE, OSAL, PSP and the sample app, with 3,343 pointer findings in the analysed
   build ([`pilots/cfs`](../pilots/cfs/README.md)).
@@ -106,18 +106,31 @@ Found but not fixed:
 
 ### Before guided playtests
 
-1. **`weaver doctor`.** Checks for Clang, GCC with the LTO plugin, binutils, gcov or `llvm-cov`,
-   SVF, and free disk and memory, and says how to install what is missing. Today a missing tool
-   shows up late, as an empty or `unsupported` result.
+1. ~~**`weaver doctor`.**~~ Done. It checks this machine by running the tools:
+   - a JSON AST from Clang;
+   - an LTO link with GCC;
+   - a coverage build with each compiler.
+
+   It also checks SVF, binutils, build tools, memory, disk and the clock, and the project's
+   configuration. Each problem comes with the install command for the platform. On this machine
+   it found the missing Clang profile runtime at once.
+   It is also in the web interface (**Check setup**).
 2. **A container image** with pinned Clang 18, GCC 13 and binutils, and SVF as an optional layer.
    Linux playtesters then need Docker and nothing else.
-3. **An onboarding guide for a repository**, with the things the cJSON run needed:
-   - the capture command (shims on `PATH`, and which build to capture: the one that compiles the
-     tests);
-   - the test and differential commands;
-   - `programs:` and entry points for libraries;
-   - the concurrency declaration;
-   - what `unexamined` means.
+3. ~~**An onboarding guide for a repository.**~~ Done: [`onboarding.md`](onboarding.md). It was
+   written from a run on cJSON's CMake build with its tests:
+   - 27 units, all `secondary-checked`;
+   - 810 pointers;
+   - the eligible change validating against 22 CTest tests in 18 s.
+
+   It covers:
+   - which build to capture;
+   - how the shims work;
+   - validation;
+   - concurrency;
+   - when to declare programs (and when not);
+   - effect models;
+   - a table of symptoms and fixes.
 4. **A warning when the validation build differs from the analysed build**: different defines,
    different dialect, or sources the analysis never saw.
 5. **A better `weaver init`**: ask for the build and test commands (`weaver tests` already detects

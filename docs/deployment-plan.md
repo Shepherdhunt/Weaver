@@ -71,8 +71,8 @@ Aim: Weaver installs on other machines without help and holds up on repositories
      an optional layer. Publish the port only on the host's loopback:
      `-p 127.0.0.1:61847:61847`.
    - Native installers later.
-2. **`weaver doctor`.** Checks compilers, the GCC LTO plugin, SVF, disk and memory, and says what
-   is missing and how to install it.
+2. **`weaver doctor`** (done). Checks compilers, the GCC LTO plugin, coverage builds, SVF, disk and
+   memory, and the project's configuration, and says what is missing and how to install it.
 3. **Several projects per server.**
    - The web interface opens and switches between projects, and remembers recent ones across
      restarts. Today it keeps them in memory.
@@ -125,8 +125,8 @@ Aim: Weaver installs on other machines without help and holds up on repositories
    - AI explanations send code excerpts to the provider the customer chooses, with the customer's
      own key. They are off by default and switched on per project. A local model server keeps
      everything on the customer's machine.
-8. **Support.** A documentation site, a guide to onboarding a repository (build command with
-   `{cc}`, tests, programs, tasks), and an issue intake.
+8. **Support.** A documentation site, the guide to onboarding a repository
+   ([`onboarding.md`](onboarding.md)), and an issue intake.
 
 ## Phase 2: teams and results in the portal
 
@@ -241,13 +241,17 @@ Done:
   under its own guide. Weaver applies it by content and asks once more if it does not apply, then
   proposes it as a patch transaction under the same checks. Nothing is applied until the draft
   validates and a person accepts it.
+- `weaver doctor` (**Check setup** in the interface) and the onboarding guide
+  ([`onboarding.md`](onboarding.md)). Doctor checks the machine by running the tools and checks the
+  project's configuration, with a fix for each problem. The guide was written from cJSON's CMake
+  build with its tests: 27 units, all `secondary-checked`, 810 pointers, and the eligible change
+  validated against 22 CTest tests.
 
 Next:
 
-1. Before guided playtests (from [`readiness.md`](readiness.md)):
-   - `weaver doctor`;
+1. Before guided playtests (from [`readiness.md`](readiness.md)). `weaver doctor` and the onboarding
+   guide are done. Still to do:
    - the container image;
-   - an onboarding guide;
    - a warning when the validation build differs from the analysed build;
    - a better `weaver init`;
    - two more first runs by someone other than the author.

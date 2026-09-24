@@ -136,6 +136,10 @@ a { color: var(--accent); }
 .pill.ok { color: var(--ok); }
 .pill.bad { color: var(--bad); }
 .pill.warn { color: var(--warn); }
+.doctor .doc-sec h3 { margin: 14px 0 6px; font-size: 13px; }
+.doctor .doc-row { display: flex; gap: 10px; align-items: flex-start; padding: 4px 0; border-top: 1px solid var(--border); }
+.doctor .doc-row .pill { min-width: 44px; justify-content: center; }
+.doctor .doc-text { min-width: 0; overflow-wrap: anywhere; }
 .dot { width: 8px; height: 8px; border-radius: 50%; background: currentColor; display: inline-block; flex: none; }
 
 .btn {

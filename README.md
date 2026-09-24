@@ -49,6 +49,7 @@ can be accepted. The optional LLM explains and recommends; it never edits or val
 | **Rejection report** | `weaver report --scope apps/sample_app`: evidence, pointers by class, each recipe's eligible and blocked candidates with the failing preconditions, the precondition that alone blocks the most, and contract status. |
 | **Change impact** | Snapshots of pointer facts (the working tree, or any git revision). `weaver impact` explains each pointer whose behavior changed since a snapshot, which edited line caused it, which recipe verdicts flipped, which pinned or transaction-implied contracts broke, and optionally whether builds and differential runs still agree. `weaver check` exits 1 on high risk, for CI. |
 | **CI ratchet** | `weaver ratchet` compares the analysis with a committed baseline (`weaver-ratchet.json`) and fails when a file gains pointers, high-risk pointers or violations of the chosen simplification profile, naming each new pointer. `--base origin/main` compares only the files a merge request changed; `--format github` annotates the pull request; `--update` locks in progress (or records a deliberate increase for review). Counts decide, so renames never fail it. Guide: [`docs/ci.md`](docs/ci.md). |
+| **Setup check and onboarding** | `weaver doctor` (and **Check setup** in the interface) checks this machine and the project before a run. It compiles a few lines with each compiler: JSON AST, LTO, a coverage build. It also checks SVF, binutils, build tools, memory, disk and the clock, and the project's configuration: compile commands, the compilers they name, the AST reader of GCC profiles, validation, acceptance requirements that nothing configures, placeholders, shared objects with no program, concurrency, the AI key, and the analysis. Every problem comes with a fix for the platform (`apt`, `dnf` or `brew`). The step-by-step guide for a new repository is [`docs/onboarding.md`](docs/onboarding.md). |
 | **Web interface** | `weaver serve`: load or set up a project, compile, then explore a map of every pointer colored by what it does to its target. Graphs show points-to and call relationships, and a source view has inline marks. Refactors can be proposed, validated and accepted, contracts pinned, and change impact compared. `--scope` shows one subsystem of a large project. `weaver export-ui` records the interface as one read-only HTML page for sharing. |
 | **AI explanations** (tracker §10) | Off by default; switched on per project. Bring your own key: Claude through Anthropic's SDK, or any OpenAI-style Chat Completions server, hosted or local. One explanation guide (Weaver's vocabulary, evidence rules, eight fixed answer sections) is given to every provider, with the same focused evidence slice and read-only evidence tools; answers are checked against it. `weaver ai`, `weaver explain`. |
 
@@ -67,7 +68,8 @@ pip install -e '.[llm]'     # optional: Claude for AI explanations (other provid
 pip install -e '.[test]'    # pytest
 ```
 
-Requires Python ≥ 3.10. Points-to evidence comes from two analyses that Weaver shows side by side:
+Requires Python ≥ 3.10. `weaver doctor` checks everything below and says how to install what is missing.
+Points-to evidence comes from two analyses that Weaver shows side by side:
 SVF (installed by `[flow]`) and GCC's own interprocedural points-to, which needs GCC with LTO support
 (`gcc-ar` or `ar` with the LTO plugin) and binutils (`nm`). `pip install -e .` alone works too, with
 GCC's analysis only. A production compiler (Clang or GCC-compatible) must be installed. For
@@ -168,7 +170,10 @@ Modifying operations run one at a time.
 
 ## Command-line walkthrough
 
+New to a repository? Follow [`docs/onboarding.md`](docs/onboarding.md). The commands at a glance:
+
 ```sh
+weaver doctor                                 # what this machine and project lack, and how to fix it
 weaver init                                   # write weaver.yaml; record profiles, target and platform facts
 weaver capture shim --tool gcc=/usr/bin/gcc   # a recording shim named like the compiler the build calls
 make clean && PATH=$PWD/.weaver/capture/shims:$PATH make   # the build's own flags are recorded
@@ -354,6 +359,9 @@ The end-to-end tests capture real builds of the fixture with Clang and GCC. They
 - your own change and AI drafts: diffs placed by content, blocked proposals that say why, a change
   that keeps its pointer or breaks a contract, one accepted and reverted with identical output; a
   draft that does not apply, is retried once and validates; a model that declines to patch;
+- `weaver doctor`: a machine with no compilers, install hints per distribution, a project that
+  cannot work (no compile commands, a required check nothing configures), a broken `weaver.yaml`, a
+  GCC project that is ready and the same project without an AST reader, and the web route;
 - the onboarding problems a first run on cJSON found: a GCC profile reads the AST with the default
   Clang (and warns without one), flags a Makefile puts in `CC` are captured, objects of `cc -c`
   without `-o` link to their sources, macros spelled differently with equal values pass fidelity,

@@ -193,6 +193,7 @@ function renderTop() {
         (st.svf_available || !(st.flow_backends || []).includes("svf") ? "" : " (SVF is not installed: pip install weaver[flow])") },
       "Points-to"),
     h("button", { class: "btn ghost", onclick: () => openSettings(), title: "Validation commands and acceptance policy" }, "Settings"),
+    h("button", { class: "btn ghost", onclick: () => openDoctor(), title: "Check that this machine and project have what Weaver needs (weaver doctor)" }, "Check setup"),
     SNAP ? null : h("button", { class: "btn ghost", onclick: () => { S.state.project = null; renderWelcome(true); },
       title: "Open another project" }, "Open…"),
     SNAP && SNAP.datasets.length > 1 ? h("select", { class: "snap-ds", id: "snap-dataset", "aria-label": "Example project",
@@ -231,9 +232,14 @@ function renderWelcome(keepProject) {
     h("label", { for: id, text: label }), h("input", { id, ...attrs }), hint ? h("div", { class: "hint", text: hint }) : null);
   const setupCard = h("div", { class: "card" },
     h("h2", { text: "Set up a new project" }),
+    h("p", { class: "hint" }, "First time on this machine? ",
+      h("a", { href: "#", onclick: (e) => { e.preventDefault(); openDoctor(); } }, "Check that it has what Weaver needs"),
+      " (compilers, points-to, coverage)."),
     f("setup-path", "Project directory", { placeholder: "/path/to/c/project" }),
     f("setup-build", "Build command", { value: "make -B CC={cc}" },
-      "{cc} is replaced by a recording shim around the compiler; use a full rebuild so every file is seen."),
+      "{cc} is replaced by a recording shim around the compiler. Shims named like the compiler also come first on PATH, " +
+      "so a plain \"make -B\" works and keeps flags the Makefile puts in CC. Use a full rebuild so every file is seen, " +
+      "and the build that also compiles the tests."),
     f("setup-cc", "Production compiler", { value: "gcc" }, "The executable your build really uses (gcc, clang, a cross compiler…)."),
     f("setup-clean", "Clean command (optional)", { placeholder: "make clean" }),
     h("div", { class: "field" }, h("label", { text: "Tests (recommended)" }),
@@ -1093,6 +1099,33 @@ function diffView(text) {
   return pre;
 }
 
+// ---------------------------------------------------------------- doctor
+async function openDoctor() {
+  if (SNAP) return readOnly("doctor");
+  const box = h("div", { class: "doctor" }, h("p", { class: "d-sub", text: "Checking compilers, points-to and coverage tools, disk and memory, and the project's configuration…" }));
+  modal("Check setup", box, (close) => [
+    h("button", { class: "btn", onclick: () => openDoctor() }, "Check again"),
+    h("button", { class: "btn primary", onclick: close }, "Close")]);
+  let res;
+  try { res = await api("doctor"); } catch (e) { clear(box).append(h("p", { class: "d-sub", text: e.message })); return; }
+  const n = res.counts;
+  const cls = { ok: "ok", fail: "bad", warn: "warn", info: "" };
+  const command = (fix) => /^(sudo |brew |pip |weaver )/.test(fix);
+  const sections = [];
+  for (const c of res.checks) {
+    if (!sections.length || sections[sections.length - 1].name !== c.section) sections.push({ name: c.section, checks: [] });
+    sections[sections.length - 1].checks.push(c);
+  }
+  clear(box).append(
+    h("p", {}, h("b", { text: n.fail ? `${n.fail} problem(s)` : "No problems" }), `, ${n.warn} warning(s). `,
+      h("span", { class: "d-sub", text: `Weaver ${res.weaver} on ${res.platform}. Same as “weaver doctor” on the command line.` })),
+    ...sections.map((sec) => h("div", { class: "doc-sec" }, h("h3", { text: sec.name }),
+      sec.checks.map((c) => h("div", { class: "doc-row" },
+        h("span", { class: `pill ${cls[c.status] || ""}`, text: c.status }),
+        h("div", { class: "doc-text" }, h("b", { text: c.name }), " ", h("span", { text: c.detail }),
+          c.fix && c.status !== "ok" ? (command(c.fix) ? copyable(c.fix) : h("div", { class: "hint", text: "Fix: " + c.fix })) : null))))));
+}
+
 function modal(title, body, actions) {
   const root = clear(document.getElementById("modal-root"));
   const close = () => clear(root);
@@ -1515,6 +1548,7 @@ const SNAP_ACTIONS = {
   accept: ["Accept", "applies a validated patch to the working tree under the acceptance policy and re-analyses.", "weaver accept T-…"],
   revert: ["Revert", "undoes an accepted transaction.", "weaver revert T-…"],
   skip: ["Skip", "closes a transaction without applying it.", "weaver skip T-…"],
+  doctor: ["Check setup", "checks the compilers, points-to and coverage tools, disk, memory and the project's configuration, and says how to fix what is missing.", "weaver doctor"],
   settings: ["Save settings", "rewrites weaver.yaml with the validation commands, acceptance policy, concurrency declaration, flow backend and AI settings.", "weaver tests --add …   (or edit weaver.yaml)"],
   "ai-key": ["Store key", "keeps your AI provider's API key in a file readable only by your account, outside the project.", "weaver ai key"],
   contracts: ["Pin contract", "records what must stay true of this pointer; later edits that break it are flagged in Changes.", "weaver contract pin P-… --expect read-only"],

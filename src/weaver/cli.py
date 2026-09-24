@@ -86,6 +86,27 @@ def cmd_capture(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_doctor(args: argparse.Namespace) -> int:
+    from weaver.config import load_project
+    from weaver.doctor import doctor, render
+    from weaver.errors import ConfigError
+
+    project, error = None, None
+    if not args.machine:
+        try:
+            project = load_project(args.config)
+        except ConfigError as e:
+            if args.config or "no weaver.yaml found" not in str(e):
+                error = str(e)  # a project was named, or one exists but does not load
+    res = doctor(project, error)
+    res["machine_only"] = bool(args.machine)
+    if args.json:
+        _print_json(res)
+    else:
+        print(render(res))
+    return 0 if res["ok"] else 1
+
+
 def cmd_probe(args: argparse.Namespace) -> int:
     from weaver.toolchain.probe import probe_profile
 
@@ -959,6 +980,10 @@ def build_parser() -> argparse.ArgumentParser:
 
     def profiles(sp: argparse.ArgumentParser) -> None:
         sp.add_argument("--profile", action="append", help="restrict to profile(s)")
+
+    sp = add("doctor", cmd_doctor, "check that this machine and project have what Weaver needs, and say how to fix it")
+    sp.add_argument("--machine", action="store_true", help="check this machine only, not the project")
+    sp.add_argument("--json", action="store_true")
 
     sp = add("probe", cmd_probe, "probe toolchain capabilities with a fixture")
     profiles(sp)
