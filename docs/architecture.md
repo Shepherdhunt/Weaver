@@ -326,24 +326,46 @@ project, and plain HTTP is allowed only to a server on the same machine.
 
 **An output parameter becomes a return value only when its target is private.** Moving a write
 from inside a call to just after it is invisible exactly when nothing else can observe the target
-during the call. The recipe requires every caller to pass `&x` where `x` is a whole automatic
-variable whose address is taken nowhere else in the caller: by pointer provenance no other code or
-thread can reach it, so no may-modify, may-read or task analysis is needed. Inside the callee the
-parameter must be write-only, each write a whole statement (so a returned expression never reads the
-value it is writing), and written on every path before every return. Null tests of the parameter can
-never succeed and are folded; a return in a branch that the folding makes dead still returns the
-status, with the record's value left zero-initialised rather than reading an unset variable. For
-a function that already returns a status, the result record (`<name>_result_t`) is the only way to
-return both without a pointer; it needs value records, which CLite lists as provisional, and the
-candidate says so. Clang does not desugar the pointee of `uint32 *`, so the pointee is resolved
+during the call. The recipe requires every caller to pass `&x`, where `x` is an automatic variable
+(or a field of one, reached with `.`) whose address is taken nowhere else in the caller. By pointer
+provenance, no other code or thread can reach it, so no may-modify, may-read or task analysis is
+needed. Inside the callee the parameter must be write-only, each write a whole statement (so a
+returned expression never reads the value it is writing). Null tests of the parameter can never
+succeed and are folded. For a function that already returns a status, the result record
+(`<name>_result_t`) is the only way to return both without a pointer. It needs value records,
+which CLite lists as provisional, and the candidate says so.
+
+*Written on some paths only.* A three-valued analysis labels each return: the value was written on
+every path to it, on none, or on some. Loops and switches are not unrolled: one that writes
+anywhere inside makes the state inside and after it "some", which is sound for both definite
+answers. When every return has the value, the function simply returns it. Otherwise the record
+also carries `has_value`, and each caller assigns the value only when it is set. The caller's
+variable then keeps its old value exactly when the original left it unchanged; this is the common
+cFS shape of an early error return. A flag set next to each write is added only where some return
+is reached with the value written on some paths. The variable then starts at zero, so a return
+never reads an unset variable. A function that returns a status and can fall off its end is
+refused: the result would be unset.
+
+*Leaf-first.* A caller may also pass on its own pointer parameter unchanged. This is allowed only if
+the caller otherwise only dereferences and null-tests that parameter, every caller of the caller is
+known, and each of them passes a private address, or forwards in turn (at most six calls up). The
+call site then writes the returned value through the forwarded pointer (`*o = leaf(a);`). That
+statement makes the caller's parameter write-only, so the caller becomes a candidate on the next
+analysis. The recipe notes this (`then: … convert it next`), and `weaver auto` converts the chain
+one validated step at a time. An assignment whose left side is the output itself is refused: the
+status would be stored before the value instead of after it.
+
+*Source details.* Clang does not desugar the pointee of `uint32 *`, so the pointee is resolved
 through the typedefs of every unit that defines the function: a typedef can name a scalar in one
 configuration and a structure in another, and all of them must agree. A returned expression may use
 macros (`return CFE_SUCCESS;`). Only the `return` keyword and the `;` must be plain source text,
-and the AST's expression must lie between them. A caller that never reads its variable discards
-the output. The call drops the value (`(void)f(a);` or `s = f(a).status;`) and the variable's
+and the AST's expression must lie between them. A caller that never reads its variable discards the
+output. The call drops the value (`(void)f(a);` or `s = f(a).status;`) and the variable's
 declaration goes with it. Assigning the value instead would leave a variable that is set but never
 used, which is an error under `-Werror`; validating on cFS caught exactly that. A variable that is
 also assigned elsewhere blocks the candidate, since removing it would need dead-store elimination.
+The flag is `bool` with `true`/`false` when the unit has `<stdbool.h>`, `_Bool` with `1`/`0`
+otherwise.
 
 **Risk is a transparent ordering, not a prediction.** Each factor is a fact Weaver already
 establishes (a cast to an integer, pointer arithmetic, an unknown or heap target, a concurrent

@@ -62,6 +62,7 @@ class Cache:
                         "eligible": res.eligible,
                         "edits": len(res.edits),
                         "preconditions": [p.to_json() for p in res.preconditions],
+                        "notes": res.notes,
                     }
             self.key, self.verdicts, self.inv, self.simplify, self.risk = key, verdicts, inv, {}, None
         assert self.inv is not None

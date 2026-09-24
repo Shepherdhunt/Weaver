@@ -197,23 +197,127 @@ Done:
 - SVF and GCC evidence side by side in the interface.
 - The simplification checker with target profiles (`weaver simplify`, the Simplify tab).
 - The risk view and risk report (`weaver risk`, the Risk tab, colour by risk on the Map).
-- The output-parameter recipe (`output-param`: void and status forms). On cFS, 3 of 146 candidates
-  are eligible. `CFE_TBL_TxnOpenTableLoadFile` (status form) and `UT_ObjIdDecompose` (void form)
-  both pass validation: every affected unit compiles, the mechanical re-check and full build pass,
-  and the same 112 ctest tests pass before and after the change. The first validation of
-  `UT_ObjIdDecompose` failed, and that failure is how the discarded-output case was found.
+- The output-parameter recipe (`output-param`): void and status forms, optional outputs
+  (`has_value`) and leaf-first conversion through forwarded pointer parameters. On cFS, 6 of 146
+  candidates are eligible; one of each form passes validation on the real build:
+  - `CFE_TBL_TxnOpenTableLoadFile` (status);
+  - `UT_ObjIdDecompose` (void);
+  - `CFE_TBL_SearchCmdHandlerTbl` (optional output).
+
+  Each time, every affected unit compiles, the mechanical re-check and full build pass, and the same
+  112 ctest tests pass before and after the change. The first validation of `UT_ObjIdDecompose`
+  failed, and that failure is how the discarded-output case was found.
 
 Next:
 
 1. Several projects per server; `weaver doctor` and the container image.
-2. Widen `output-param` along its measured cFS blockers (146 candidates, 3 eligible; one
-   candidate usually fails several preconditions):
-   - add the unit-test build as a profile. Tests and applications outside the analysed build
-     reference 125 of the functions, and the recipe will not change a signature whose callers it
-     cannot rewrite;
-   - an "optional output" form for the 74 functions that return an error before writing the output.
-     The record says whether the value was written, and the caller keeps its old value when it was
-     not;
-   - convert leaf-first. 59 calls forward the caller's own pointer parameter (or pass a structure
-     member); once the callee returns a value, the caller's parameter becomes a candidate in turn;
-   - an in-out recipe for the 22 parameters that are read as well as written.
+2. Widen `output-param` along its measured cFS blockers (146 candidates, 6 eligible). One candidate
+   usually fails several preconditions:
+   - Callers outside the analysed build (unit tests, other applications, other OS ports) or a
+     function whose address is taken: 125 candidates, 41 of them blocked by nothing else. In cFS,
+     every public function also has a generated unit-test stub. Analysing the unit-test build as a
+     profile, and updating stubs together with the function, would lift most of these.
+   - Targets that are not private: 59 candidates. Most pass a pointer into a shared record
+     (`&Rec->Field`) or a pointer variable. Allowing them needs the points-to evidence to show that
+     the call touches the target through nothing else, and the task model to show that no other
+     task does.
+   - In-out parameters, read as well as written: 22 candidates. They need their own recipe.
+   - Callers that pass `NULL` because they do not want the output: 10 call sites. These are
+     convertible when the null test in the callee guards only the write.
+
+## How much can be automated
+
+This assessment is measured on the cFS pilot: cFE, OSAL, PSP and the sample app, with 3,343 pointer
+findings in the analysed build.
+
+| What | Result on cFS |
+|---|---|
+| Analysis: inventory, SVF and GCC points-to, task model, risk, simplification | the whole build in minutes, under 1 GB |
+| `output-param` | 146 candidates, 6 eligible, 3 validated on the real build |
+| `scalar-input` | 1,871 candidates, 0 eligible |
+| `local-alias` | 1,039 candidates, 20 eligible |
+| All recipes together | about 26 of 3,343 pointers removable automatically today (under 1%) |
+
+**The analysis half is realistic today.** It shows a team:
+- where the pointers are;
+- which pointers are risky, and why;
+- what each pointer may point to, by two independent engines;
+- which task may write its target;
+- which functions already meet a target profile;
+- what exactly blocks each automatic change.
+
+That is the map a de-pointering effort needs, and it scales to a flight-software code base.
+
+**Automatic removal will stay a minority of the pointers in mature C.** 987 of the 1,039 local
+pointers fail only on being bound once to a fixed object: they receive a buffer or record from a
+call, or are reassigned. Most cFS pointers are structural:
+- buffers with lengths;
+- handles to shared records reached through pointers;
+- message buffers;
+- callbacks;
+- OS interfaces;
+- public functions whose stubs, tests and users elsewhere depend on their signatures.
+
+Removing one of these is a design decision, such as a new type, an ownership rule or an interface
+change. A behaviour-preserving recipe cannot make that decision on its own. Each recipe extension
+adds candidates (optional outputs and leaf-first took `output-param` from 3 to 6 eligible on cFS),
+but none changes that picture.
+
+**So the realistic product is a guided, checked migration.** Weaver finds and ranks the work, and
+makes the provably safe mechanical changes itself. Every other change, made by a person or an AI
+assistant, goes through the same checks. The recipes remain valuable as much for their blockers,
+which tell an engineer exactly what to change by hand, as for their patches.
+
+### Options that fit the tool
+
+In rough order of value:
+
+1. **Validate your own patch.** Take a diff written by hand and run it through the same pipeline:
+   - compile in every configuration;
+   - re-check that the pointer is gone and that nothing else changed;
+   - run the tests and differential runs;
+   - show the change impact on facts and contracts;
+   - record a ledger entry.
+
+   This makes the manual majority of the work as checkable as the recipes, and fits the existing
+   transaction model.
+2. **AI-drafted patches through the same gate.** For a blocked pointer, the configured model drafts a
+   change from the evidence slice under the shared guide, and Weaver validates it like a manual
+   patch. The model proposes; nothing is accepted without the checks. This reuses the
+   bring-your-own-key setup.
+3. **Coverage of the changed lines.** During validation, measure (gcov or llvm-cov) whether the
+   tests executed the edited lines, and say so on the card. A passing suite that never runs the
+   changed function is weak evidence today, and the card should not call it behavioural.
+4. **A ratchet in CI.** `weaver check` fails a merge request that adds pointers, high-risk pointers
+   or profile violations in the files it touches. This keeps progress from eroding while teams
+   migrate, and builds on snapshots and change impact.
+5. **Unit tests and stubs inside the program.** Analyse the unit-test build as a profile, and let a
+   recipe update generated stubs and test call sites together with the function. On cFS this is
+   the largest single blocker (see Next, item 2).
+6. **Shared targets from evidence.** Allow outputs into shared records when SVF and GCC agree that
+   the call reaches the record only through the parameter, and the task model shows no other task
+   touches it during the call.
+7. **Idiom recipes in order of frequency.** Count the idioms first, using the simplification
+   checker's rule counts. Then build recipes in the order the code base needs them:
+   - buffer and length → bounded array or span record;
+   - handle → typed ID;
+   - callback → enumerated dispatch;
+   - small read-only record → by value;
+   - in-out scalar → value in, value out.
+8. **Bounded equivalence per function.** For a recipe's output, generate a CBMC harness that runs
+   the old and new function on the same unconstrained inputs and compares their results, up to a
+   loop bound. This is stronger than tests, and honest about its bound. It suits the certification
+   culture of flight software.
+9. **Module-at-a-time redesign with boundary adapters.** Convert a module's interior to the target
+   profile and keep a pointer-based adapter at its boundary. The ledger lists the adapters until
+   the callers move. This is how a C-to-CLite translation can proceed incrementally.
+10. **Team workflow for named users.** Assign modules or pointers to people, record reviews on
+    ledger entries, and show a burn-down per module across snapshots. This matches the per-project
+    licence for named users.
+
+**Limits to state to customers:**
+- The analysis covers the configurations that were built.
+- Macro-heavy code blocks edits more often than analysis.
+- C only, no C++.
+- A working build must be captured.
+- Every linked object must be analysed or modelled.

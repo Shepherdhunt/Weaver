@@ -322,6 +322,8 @@ button.tchip:hover { border-color: var(--accent); }
 .pre-list li .ev { color: var(--muted); font-size: 12px; margin: 3px 0 4px; padding-left: 8px; border-left: 2px solid var(--border); }
 .icon-ok { color: var(--ok); } .icon-bad { color: var(--bad); } .icon-unk { color: var(--warn); }
 .recipe-actions { display: flex; gap: 6px; padding: 0 10px 10px; flex-wrap: wrap; }
+.recipe-notes { padding: 0 10px 8px; font-size: 12px; color: var(--muted); display: grid; gap: 2px; }
+.recipe-notes .then { color: var(--accent); }
 .excerpt { border: 1px solid var(--border); border-radius: 8px; overflow: auto; max-height: 280px; }
 .excerpt pre { margin: 0; padding: 8px 10px; background: var(--code-bg); }
 

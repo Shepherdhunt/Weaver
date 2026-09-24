@@ -949,6 +949,8 @@ function renderDetail() {
         r.eligible ? h("span", { class: "badge", style: { color: "var(--c-eligible)" }, text: `✦ eligible · ${r.edits} edit(s)` })
           : h("span", { class: "badge", style: { color: "var(--muted)" }, text: "blocked" })),
       list,
+      (r.notes || []).length ? h("div", { class: "recipe-notes" }, r.notes.map((n) => h("div", {
+        class: n.startsWith("then:") ? "then" : "", text: n.startsWith("then:") ? "→ " + n.slice(5).trim() : n }))) : null,
       h("div", { class: "recipe-actions" },
         h("button", { class: "btn small" + (r.eligible ? " primary" : ""), onclick: () => propose(f.id, rid),
           title: r.eligible ? "Open a transaction and preview the patch" : "Record the rejection in the ledger" },

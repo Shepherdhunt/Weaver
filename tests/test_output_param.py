@@ -31,6 +31,7 @@ int partial(int a, int *out);
 int get_rec(rec_t *out);
 int reads_back(int *io);
 int in_cond(int *out);
+int count_pos(int a, int b, int *out);
 
 #endif
 """
@@ -78,6 +79,16 @@ int get_rec(rec_t *out)
     *out = r;
     return 0;
 }
+
+int count_pos(int a, int b, int *out)
+{
+    if (a > 0)
+        *out = a;
+    if (b > 0)
+        return 1;
+    *out = b;
+    return 0;
+}
 """
 
 MAIN_C = """\
@@ -85,6 +96,13 @@ MAIN_C = """\
 #include "lib.h"
 
 int g_value;
+int *g_keep;
+
+struct pair
+{
+    int a;
+    int b;
+};
 
 static void square(int a, int *out)
 {
@@ -99,6 +117,43 @@ static void fill_global(int *out)
 static void twice(int a, int *out)
 {
     *out = 2 * a;
+}
+
+static void leaf(int a, int *out)
+{
+    *out = a + 1;
+}
+
+static int mid(int a, int *o)
+{
+    if (o == NULL)
+        return -1;
+    leaf(a, o);
+    return 0;
+}
+
+static void leaf2(int *out)
+{
+    *out = 1;
+}
+
+static void keeps(int *o)
+{
+    g_keep = o;
+    leaf2(o);
+}
+
+static void maybe_set(int a, int *out)
+{
+    if (a)
+        *out = a;
+}
+
+static void set_if(int a, int *out)
+{
+    if (!a)
+        return;
+    *out = a;
 }
 
 static int wrap(int k)
@@ -129,6 +184,22 @@ int main(void)
         printf("cond %d\\n", c);
     printf("v=%d s=%d w=%d t=%d d=%d g=%d q=%d p=%d r=%d wrap=%d\\n", v, s, w, t, d, g_value, q, p, r, wrap(2));
     printf("rec=%d s2=%d\\n", rr.a, s2);
+    struct pair pr = {0, 0};
+    square(5, &pr.b);
+    int lv = 0;
+    int ms = mid(4, &lv);
+    int kk = 0;
+    keeps(&kk);
+    int m1 = 9, m2 = 9, m3 = 9, m4 = 9;
+    maybe_set(0, &m1);
+    maybe_set(6, &m2);
+    set_if(0, &m3);
+    set_if(8, &m4);
+    int k1 = 7, k2 = 7;
+    int c1 = count_pos(-1, 2, &k1);
+    int c2 = count_pos(5, 2, &k2);
+    printf("pr=%d lv=%d ms=%d kk=%d m=%d,%d,%d,%d\\n", pr.b, lv, ms, kk, m1, m2, m3, m4);
+    printf("k=%d,%d c=%d,%d\\n", k1, k2, c1, c2);
     return 0;
 }
 """
@@ -208,11 +279,10 @@ def outp(tmp_path_factory):
 @needs_build
 def test_blockers_are_explained(outp):
     r = _eval(outp)
-    assert set(r) == {"read_value", "partial", "reads_back", "in_cond", "square", "fill_global", "get_rec", "twice"}
-    _, res = r["partial"]
-    assert not res.eligible and "returns before the output is written" in " ".join(
-        _pre(res, "OP.written-on-every-path").evidence
-    )
+    assert set(r) == {
+        "read_value", "partial", "reads_back", "in_cond", "square", "fill_global", "get_rec", "twice", "leaf",
+        "leaf2", "maybe_set", "set_if", "count_pos",
+    }  # fmt: skip
     _, res = r["reads_back"]
     assert _pre(res, "OP.write-only").status == "violated"
     _, res = r["in_cond"]
@@ -225,10 +295,29 @@ def test_blockers_are_explained(outp):
     assert "pointee 'rec_t' is not a scalar type" in _pre(res, "OP.parameter-type").evidence
     _, res = r["read_value"]
     assert _pre(res, "OP.parameter-type").status == "established"
+    _, res = r["leaf2"]  # keeps() stores the pointer it forwards: the chain is not private
+    assert "keeps()'s parameter 'o', which keeps() also uses otherwise" in " ".join(
+        _pre(res, "OP.private-target").evidence
+    )
 
 
 @needs_build
-def test_both_forms_are_applied_and_preserve_behaviour(outp):
+def test_optional_output_and_leaf_first(outp):
+    r = _eval(outp)
+    _, res = r["partial"]  # returns early without writing: the record says whether it wrote
+    assert res.eligible and "output: optional (has_value)" in res.notes
+    assert "never before 1" in " ".join(_pre(res, "OP.written-before-return").evidence)
+    _, res = r["count_pos"]
+    assert res.eligible and "on some paths before 1" in " ".join(_pre(res, "OP.written-before-return").evidence)
+    _, res = r["leaf"]  # mid() passes on its own parameter; main() passes &lv
+    assert res.eligible, [p.to_json() for p in res.preconditions if p.status != "established"]
+    assert "forward the caller's own pointer parameter" in " ".join(_pre(res, "OP.private-target").evidence)
+    assert any("mid()'s parameter 'o' is then only written" in n for n in res.notes)
+    assert "mid" not in r  # mid() only passes 'o' on: not a candidate until leaf() returns the value
+
+
+@needs_build
+def test_every_form_is_applied_and_preserves_behaviour(outp):
     before = _run(outp)
     r = _eval(outp)
     _, sq = r["square"]
@@ -238,16 +327,11 @@ def test_both_forms_are_applied_and_preserve_behaviour(outp):
     assert rv.eligible, [p.to_json() for p in rv.preconditions if p.status != "established"]
     assert rv.capabilities_required == ["value_records"]
 
-    for fn in ("square", "read_value"):
-        f, _ = _eval(outp)[fn]
-        out = subprocess.run(
-            ["python", "-m", "weaver.cli", "-C", str(outp), "propose", f["id"], "--recipe", "output-param"],
-            capture_output=True, text=True,
-        )  # fmt: skip
-        tid = re.search(r"T-[0-9a-f]{8}", out.stdout + out.stderr).group(0)
-        assert run_cli(outp, "validate", tid) == 0
-        assert run_cli(outp, "accept", tid) == 0
-        assert run_cli(outp, "refresh") == 0
+    # convert, validate and accept every eligible candidate, re-analysing after each: leaf() comes first, and
+    # mid() becomes eligible once its parameter is only written
+    assert run_cli(outp, "auto", "--recipe", "output-param", "--max", "20") == 0
+    done = {f for f in ("square", "read_value", "partial", "count_pos", "leaf", "mid", "maybe_set", "set_if")}
+    assert not done & set(_eval(outp)), sorted(done & set(_eval(outp)))
 
     main = (outp / "main.c").read_text()
     lib_c, lib_h = (outp / "lib.c").read_text(), (outp / "lib.h").read_text()
@@ -269,4 +353,16 @@ def test_both_forms_are_applied_and_preserve_behaviour(outp):
     # outputs the caller never reads are discarded with their variables (set-but-unused is an error here)
     assert "(void)square(3);" in main and "int unused;" not in main
     assert "int s2 = read_value(5).status;" in main and "int z2;" not in main
+    assert "pr.b = square(5);" in main  # a field of a private local
+    # optional outputs: the caller assigns only what was written
+    assert re.search(rf"int q = (partial_r\d+)\.status;{ws}if \(\1\.has_value\) p = \1\.value;", main)
+    assert "_Bool has_value;" in lib_h and "int count_pos_written = 0;" not in lib_c
+    assert "_Bool out_written = 0;" in lib_c and "*out" not in lib_c.split("count_pos", 1)[1]
+    assert ".has_value = out_written}" in lib_c and "out = b; out_written = 1;" in lib_c
+    assert "{ out = a; out_written = 1; }" in main  # braces keep the flag under the if
+    assert "return (set_if_result_t){.has_value = 0};" in main
+    assert "return (set_if_result_t){.value = out, .has_value = 1};" in main
+    # leaf-first: leaf() returned the value into mid()'s parameter, then mid() returned it itself
+    assert "o = leaf(a);" in main and "leaf(a, o)" not in main and "static mid_result_t mid(int a)" in main
+    assert re.search(rf"(mid_r\d+) = mid\(4\);{ws}int ms = \1\.status;{ws}lv = \1\.value;", main)
     assert _run(outp) == before  # the program prints exactly what it printed before

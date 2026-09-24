@@ -294,6 +294,9 @@ def cmd_candidates(args: argparse.Namespace) -> int:
             f"  ELIGIBLE {f['id']:<14} {r.recipe:<12} {f['file']}:{f['line']} {f.get('function')}() "
             f"'{f['name']}' ({len(r.edits)} edit(s))"
         )
+        for n in r.notes:
+            if n.startswith("then:"):
+                print(f"           then {n[5:].strip()}")
     if args.all:
         for f, r in blocked:
             reasons = "; ".join(f"{b['id']}: {b['evidence'][0] if b['evidence'] else b['status']}" for b in r.blockers)
