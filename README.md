@@ -38,6 +38,8 @@ can be accepted. The optional LLM explains and recommends; it never edits or val
 | Recipe `local-alias` (tracker §§4-5) | Replaces a local alias of one known object with direct access to that object. 13 preconditions. |
 | **Recipe `scalar-input`** (tracker §5) | Turns a read-only pointer-to-scalar parameter into a value parameter, and rewrites every declaration, dereference and call site (`&x` → `x`, `p` → `*p`). 10 preconditions, including SVF-backed may-modify, a complete caller set, sequencing at each call site, and no concurrent writer (single-threaded, or decided by the task model). |
 | **Recipe `output-param`** (tracker roadmap) | Turns a pointer parameter the function only writes into a return value. A `void` function returns the value (`get(a, &v);` → `v = get(a);`); a function that returns a status returns a small result record declared next to its prototype (`s = read(&v);` → the record's `status` and `value`). When the value is written on some paths only (an early error return), the record also carries `has_value`, and the caller assigns the value only when it was written. Each call must pass the address of a local variable (or a field of one) whose address is taken nowhere else, or pass on the caller's own pointer parameter from callers that do: converting the callee first then makes the caller a candidate (leaf-first; `weaver auto --recipe output-param` runs the chain, validating each step). A caller that never reads its variable drops the value and the variable. |
+| **Your own change** | `weaver patch change.diff --removes P-…` (or **Check my change…** in the interface) opens a transaction for a unified diff you wrote. Hunks are placed by their content, so approximate line numbers are fine. Validation runs the recipe checks: every affected configuration compiles, the configured tests and differential runs pass on both trees, and the ledger keeps a checkpoint for revert. The mechanical re-check differs: every affected unit is analysed before and after the patch and its pointer facts compared with the rules of change impact. It fails when a named pointer still exists or a pinned or implied contract breaks. Every other change (a pointer added, a read-only pointer now written, a new escape) is listed for review before acceptance. |
+| **AI drafts** | A second switch, `ai.drafts`, on top of AI explanations. `weaver draft P-…` (or **Draft a change with AI**) asks the configured model for a patch that removes the pointer. The model receives its own drafting guide (the same for every provider), the evidence slice, and the exact source of the function, its callers and its declarations. If the draft does not apply, Weaver asks once more with the reason, then opens a transaction exactly as for your own change. Nothing is applied until the draft validates and you accept it. |
 | Transactions (tracker §6) | Candidate cards. States: discovered → analyzed → blocked / proposed → validated / provisional / rejected → accepted / skipped → reverted. Patches are bound to source hashes. Revert uses a three-way merge so later unrelated edits survive. |
 | Validation (tracker §7) | Isolated baseline and candidate workspaces. The production compiler rebuilds every unit whose main file *or included headers* were edited. A mechanical re-check parses the patched AST again. Configured builds, tests and differential comparisons run in both workspaces; CTest and Meson results are compared test by test, so a test that already fails on the baseline is not blamed on the patch. An acceptance policy judges the results. |
 | **Validation strength** | Each validation and acceptance records whether anything ran the patched program (`behavioural`) or not (`compile-only`), shown on the card, the ledger, impact reports and the web interface. `weaver tests` and the setup form detect the project's test commands (Make `test`/`check`, CTest, Meson, test scripts); the web settings editor changes validation commands and the acceptance policy. |
@@ -137,6 +139,14 @@ Settings); they never go into `weaver.yaml`. Every provider receives the same ex
 (`weaver ai guide` prints it) and must answer in the same eight sections, so explanations read the
 same whichever model gives them. Answers that skip a section are flagged.
 
+**Your own changes** go through the same checks. **Check my change…** (on a pointer, or in
+Transactions) takes a unified diff and opens a transaction; validation compiles, compares every
+affected unit's pointer facts before and after, re-checks contracts and runs the tests on both
+trees. The transaction lists the pointers removed and added, and every change a reviewer should look
+at before accepting. With **AI drafts** switched on as well (Settings), **Draft a change with AI**
+asks the model for such a patch and checks it the same way: the model proposes; nothing is
+applied until the draft validates and you accept it.
+
 The top bar shows the validation strength. **validation: compile only** means no test or
 differential run is configured, so an accepted change has been compiled and re-checked but never
 run. **Settings** edits validation commands, the acceptance policy, the concurrency declaration and
@@ -180,6 +190,9 @@ weaver accept T-0bb5fce6                      # apply under the acceptance polic
 weaver revert T-0bb5fce6                      # undo an accepted transaction
 weaver auto --max 10                          # propose/validate/accept eligible candidates under the policy
 weaver auto --recipe output-param --max 20    # leaf-first: each conversion can make its caller eligible
+weaver patch change.diff --removes P-1a2b3c4d5e --title "…"   # your own change, checked like a recipe's
+weaver ai enable --drafts                     # also let the model draft patches (sends whole functions)
+weaver draft P-1a2b3c4d5e                     # an AI draft, proposed as a transaction; validate as usual
 
 weaver contract pin P-1a2b3c4d5e --expect read-only,no-escape --reason "callers reuse the buffer"
 weaver contract pin P-9f8e7d6c5b --expect borrowed --reason "SB buffer: valid until the next receive"
@@ -326,6 +339,9 @@ The end-to-end tests capture real builds of the fixture with Clang and GCC. They
   propose/validate/accept and setup/capture workflows through its jobs;
 - AI explanations: the Claude tool loop against a fake client, the OpenAI-compatible loop against a
   fake local server, the shared guide and its section check, the on/off switch and private key storage.
+- your own change and AI drafts: diffs placed by content, blocked proposals that say why, a change
+  that keeps its pointer or breaks a contract, one accepted and reverted with identical output; a
+  draft that does not apply, is retried once and validates; a model that declines to patch.
 
 ## License
 

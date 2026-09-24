@@ -353,6 +353,43 @@ def cmd_propose(args: argparse.Namespace) -> int:
     return 0 if txn["state"] == "proposed" else 3
 
 
+def cmd_patch(args: argparse.Namespace) -> int:
+    from weaver.card import render_card
+    from weaver.ledger import Ledger
+
+    data = sys.stdin.buffer.read() if args.diff == "-" else Path(args.diff).read_bytes()
+    txn = Ledger(_project(args)).propose_patch(data, args.removes or [], args.title or "", {"kind": "manual"})
+    print(render_card(txn))
+    return 0 if txn["state"] == "proposed" else 3
+
+
+def cmd_draft(args: argparse.Namespace) -> int:
+    from weaver.card import render_card
+    from weaver.ledger import Ledger
+    from weaver.llm.draft import draft
+
+    proj = _project(args)
+    res = draft(
+        proj,
+        args.finding,
+        dry_run=args.dry_run,
+        propose=not args.no_propose,
+        log=lambda m: print(m, file=sys.stderr),
+    )
+    if args.dry_run:
+        _print_json(res)
+        return 0
+    if "txn" in res:
+        print(render_card(Ledger(proj).load(res["txn"])))
+        return 0 if res["state"] == "proposed" else 3
+    print(res.get("text", ""))
+    if res.get("patch"):
+        print("\n--- the draft's patch (not proposed) ---\n" + res["patch"])
+        return 0
+    print(f"weaver: {res.get('error')}", file=sys.stderr)
+    return 3
+
+
 def cmd_validate(args: argparse.Namespace) -> int:
     from weaver.card import render_card
     from weaver.ledger import Ledger
@@ -364,12 +401,18 @@ def cmd_validate(args: argparse.Namespace) -> int:
 
 def cmd_accept(args: argparse.Namespace) -> int:
     from weaver.ledger import Ledger
+    from weaver.patch import review_items
 
     txn = Ledger(_project(args)).accept(args.txn)
     print(
         f"{txn['id']} accepted: {', '.join(txn['acceptance']['post_hashes'])} updated; checkpoint "
         f"{txn['acceptance']['checkpoint']}.\nRun 'weaver refresh' before selecting the next candidate."
     )
+    review = review_items(txn)
+    if review:
+        print(f"note: validation listed {len(review)} change(s) to pointer facts for review:", file=sys.stderr)
+        for x in review[:20]:
+            print(f"  [{x['severity']}] {x.get('name') or ''}: {x['text']}", file=sys.stderr)
     if txn["acceptance"].get("strength") != "behavioural":
         print(
             "warning: accepted on compile and re-check evidence only; no test or differential run passed. "
@@ -545,6 +588,8 @@ def cmd_ai(args: argparse.Namespace) -> int:
         return 0
     if args.action in ("enable", "disable"):
         change: dict[str, Any] = {"enabled": args.action == "enable"}
+        if args.drafts is not None:
+            change["drafts"] = args.drafts
         for k in ("provider", "model", "base_url"):
             if getattr(args, k):
                 change[k] = getattr(args, k)
@@ -558,6 +603,7 @@ def cmd_ai(args: argparse.Namespace) -> int:
             print(f"key stored for {proj.ai.key_id} in {keys_path()} (readable only by you)")
     st = ai_settings(proj)
     print(f"AI explanations: {'on' if st['enabled'] else 'off'}")
+    print(f"AI drafts: {'on' if st['enabled'] and st['drafts'] else 'off'}" + ("" if st["drafts"] else " (--drafts)"))
     print(f"  provider: {st['provider']}   model: {st['model'] or st['default_model'] or '(set ai.model)'}")
     if st["provider"] != "anthropic":
         print(f"  endpoint: {st['base_url'] or st['default_base_url']}")
@@ -1060,12 +1106,28 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--top", type=int, default=20, help="functions to list (default 20)")
     sp.add_argument("--json", action="store_true")
 
-    sp = add("ai", cmd_ai, "AI explanations: status, enable/disable, provider, your API key, the guide")
+    sp = add("ai", cmd_ai, "AI explanations and drafts: status, enable/disable, provider, your API key, the guides")
     sp.add_argument("action", nargs="?", default="status", choices=["status", "enable", "disable", "key", "guide"])
     sp.add_argument("--provider", choices=["anthropic", "openai-compatible"])
     sp.add_argument("--model", help="model id (required for openai-compatible)")
     sp.add_argument("--base-url", help="Chat Completions endpoint, e.g. http://localhost:11434/v1 for Ollama")
     sp.add_argument("--forget", action="store_true", help="with 'key': remove the stored key")
+    sp.add_argument(
+        "--drafts",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="with enable/disable: also let the model draft patches (--no-drafts turns only drafts off)",
+    )
+
+    sp = add("patch", cmd_patch, "open a transaction for your own change (a unified diff) and check it like a recipe's")
+    sp.add_argument("diff", help="unified diff against the analysed tree (git diff, diff -u); '-' reads stdin")
+    sp.add_argument("--removes", action="append", metavar="FINDING", help="a pointer the change removes (repeatable)")
+    sp.add_argument("--title", help="what the change does, for the ledger")
+
+    sp = add("draft", cmd_draft, "ask the project's AI model to draft a patch removing a pointer; check it like yours")
+    sp.add_argument("finding")
+    sp.add_argument("--dry-run", action="store_true", help="print the request instead of sending it")
+    sp.add_argument("--no-propose", action="store_true", help="print the draft instead of opening a transaction")
 
     sp = add("auto", cmd_auto, "propose/validate/accept eligible candidates under the acceptance policy")
     sp.add_argument("--recipe", help="restrict to one recipe (default: all)")

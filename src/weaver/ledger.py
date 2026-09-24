@@ -44,6 +44,9 @@ from weaver.util import (
 )
 
 OPEN_STATES = {TxnState.PROPOSED.value, TxnState.VALIDATED.value, TxnState.PROVISIONAL.value}
+FINDING_KEYS = (
+    "kind", "name", "function", "file", "line", "col", "type", "use_summary", "evidence_status", "occurrences",
+)  # fmt: skip
 
 
 class Ledger:
@@ -103,21 +106,7 @@ class Ledger:
             "id": txn_id,
             "created_at": now_iso(),
             "finding_id": finding["id"],
-            "finding": {
-                k: finding.get(k)
-                for k in (
-                    "kind",
-                    "name",
-                    "function",
-                    "file",
-                    "line",
-                    "col",
-                    "type",
-                    "use_summary",
-                    "evidence_status",
-                    "occurrences",
-                )
-            },
+            "finding": {k: finding.get(k) for k in FINDING_KEYS},
             "recipe": recipe.id,
             "recipe_version": recipe.version,
             "candidate": cand,
@@ -128,9 +117,62 @@ class Ledger:
         }
         self.transition(txn, TxnState.DISCOVERED, "finding selected")
         self.transition(txn, TxnState.ANALYZED, f"recipe {recipe.id} v{recipe.version} evaluated")
-        if not result.eligible:
+        return self._open(txn)
+
+    def propose_patch(
+        self,
+        diff_text: str | bytes,
+        removes: list[str] | None = None,
+        title: str = "",
+        origin: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Open a transaction for a hand-written or AI-drafted unified diff (``weaver.patch``)."""
+        from weaver.patch import RECIPE, VERSION, candidate_from_patch, origin_label
+
+        inv = load_inventory(self.project)
+        origin = origin or {"kind": "manual"}
+        cand = candidate_from_patch(self.project, inv, diff_text, list(removes or []), title, origin)
+        targets = cand["recheck"]["targets"]
+        if targets:
+            f = find_finding(inv, targets[0])
+            finding = {k: f.get(k) for k in FINDING_KEYS}
+        else:
+            first = sorted(cand["first_line"].items())[:1]
+            finding = {
+                "kind": "patch",
+                "name": title or "change",
+                "function": None,
+                "file": first[0][0] if first else None,
+                "line": first[0][1] if first else None,
+            }
+        txn_id = "T-" + short_hash("patch", cand["file_hashes"], title, time.time_ns(), length=8)
+        txn: dict[str, Any] = {
+            "schema": f"weaver.txn/{SCHEMA_VERSION}",
+            "id": txn_id,
+            "created_at": now_iso(),
+            "finding_id": cand["finding_id"],
+            "finding": finding,
+            "recipe": RECIPE,
+            "recipe_version": VERSION,
+            "title": title,
+            "origin": origin,
+            "candidate": cand,
+            "source_revision": _source_revision(self.project.root),
+            "preservation_contract": self.project.preservation,
+            "clite_model": self.project.clite,
+            "history": [],
+        }
+        self.transition(txn, TxnState.DISCOVERED, f"{origin_label(origin)} submitted")
+        self.transition(txn, TxnState.ANALYZED, f"{len(cand['edits'])} edit(s) in {len(cand['file_hashes'])} file(s)")
+        return self._open(txn)
+
+    def _open(self, txn: dict[str, Any]) -> dict[str, Any]:
+        """Blocked, or proposed with its patch rendered from the edits."""
+        cand = txn["candidate"]
+        if not cand["eligible"]:
+            blockers = [p for p in cand["preconditions"] if p["status"] != "established"]
             self.transition(
-                txn, TxnState.BLOCKED, "; ".join(f"{b['id']} {b['status']}" for b in result.blockers) or "no edits"
+                txn, TxnState.BLOCKED, "; ".join(f"{b['id']} {b['status']}" for b in blockers) or "no edits"
             )
             return txn
         edits = [Edit.from_json(e) for e in cand["edits"]]

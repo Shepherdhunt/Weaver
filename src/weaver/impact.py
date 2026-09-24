@@ -337,13 +337,22 @@ def _implied_contracts(project: Project) -> list[dict[str, Any]]:
     return out
 
 
-def check_contracts(project: Project, inv: dict[str, Any]) -> list[dict[str, Any]]:
+def check_contracts(
+    project: Project, inv: dict[str, Any], subjects: set[str] | None = None, whole_program: bool = True
+) -> list[dict[str, Any]]:
+    """Every contract's status on ``inv``.  ``subjects``: check only pinned contracts on these findings;
+    ``whole_program`` False: ``inv`` holds only some units' facts, so 'borrowed' (which follows every call)
+    is left unknown."""
     from weaver.frontend.typestr import safe_parse
 
     results = []
     by_id = {f["id"]: f for f in inv["findings"]}
     cache: dict[str, Any] = {}
     for c in load_contracts(project):
+        if subjects is not None and c["finding"] not in subjects:
+            continue
+        if not whole_program and "borrowed" in c["expect"]:
+            c = {**c, "expect": [e for e in c["expect"] if e != "borrowed"], "borrowed_skipped": True}
         f = by_id.get(c["finding"])
         if f is None:
             results.append(
@@ -357,6 +366,8 @@ def check_contracts(project: Project, inv: dict[str, Any]) -> list[dict[str, Any
             )
             continue
         v, unk = _contract_check(c, f, project, inv, cache)
+        if c.get("borrowed_skipped"):
+            unk = unk + ["borrowed: follows every call, so it is re-checked by 'weaver check' after acceptance"]
         status = "violated" if v else "unknown" if unk else "held"
         results.append(
             {
@@ -454,35 +465,31 @@ def _in_hunks(hunks: list[dict[str, Any]], line: int | None) -> bool:
     return bool(line) and any(h["new"][0] <= line <= max(h["new"][1], h["new"][0]) for h in hunks)
 
 
-def diff(project: Project, base: dict[str, Any], cur: dict[str, Any], cur_verdicts: dict[str, Any]) -> dict[str, Any]:
-    tree: Path = base["tree"]
-    binv = base["inventory"]
-    files = sorted(set(binv["files"]) | set(cur["files"]))
-    changed_files: dict[str, list[dict[str, Any]]] = {}
-    for rel in files:
-        old, new = tree / rel, project.root / rel
-        if old.exists() and new.exists() and sha256_file(old) == sha256_file(new):
-            continue
-        changed_files[rel] = _file_hunks(old, new)
+def _change(sev: str, f: dict[str, Any], aspect: str, text: str, **extra: Any) -> dict[str, Any]:
+    return {
+        "severity": sev,
+        "finding": f["id"],
+        "name": f.get("name"),
+        "kind": f.get("kind"),
+        "function": f.get("function"),
+        "file": f.get("file"),
+        "aspect": aspect,
+        "text": text,
+        **extra,
+    }
 
-    bf = {f["id"]: f for f in binv["findings"]}
-    cf = {f["id"]: f for f in cur["findings"]}
+
+def finding_changes(
+    bf: dict[str, dict[str, Any]],
+    cf: dict[str, dict[str, Any]],
+    root: Path,
+    changed_files: dict[str, list[dict[str, Any]]],
+) -> list[dict[str, Any]]:
+    """Every difference in pointer facts between two sets of findings keyed by ID (``root``: the new tree)."""
     changes: list[dict[str, Any]] = []
 
     def add(sev: str, f: dict[str, Any], aspect: str, text: str, **extra: Any) -> None:
-        changes.append(
-            {
-                "severity": sev,
-                "finding": f["id"],
-                "name": f.get("name"),
-                "kind": f.get("kind"),
-                "function": f.get("function"),
-                "file": f.get("file"),
-                "aspect": aspect,
-                "text": text,
-                **extra,
-            }
-        )
+        changes.append(_change(sev, f, aspect, text, **extra))
 
     for fid in sorted(set(cf) - set(bf)):
         f = cf[fid]
@@ -494,7 +501,7 @@ def diff(project: Project, base: dict[str, Any], cur: dict[str, Any], cur_verdic
             f"new {f['kind']} pointer '{f.get('name')}' ({f.get('type')}) in {f.get('function') or f.get('file')}"
             f"{'()' if f.get('function') else ''} at line {f.get('line')}, {cls}",
             line=f.get("line"),
-            source=_source_line(project.root, f.get("file"), f.get("line")),
+            source=_source_line(root, f.get("file"), f.get("line")),
             caused_by_change=_in_hunks(changed_files.get(f.get("file") or "", []), f.get("line")),
         )
     for fid in sorted(set(bf) - set(cf)):
@@ -533,7 +540,7 @@ def diff(project: Project, base: dict[str, Any], cur: dict[str, Any], cur_verdic
                 "use",
                 f"line {u['line']}: {d} — {why}",
                 line=u["line"],
-                source=_source_line(project.root, b.get("file"), u["line"]),
+                source=_source_line(root, b.get("file"), u["line"]),
                 caused_by_change=_in_hunks(hunks, u["line"]),
             )
         for key in sorted(gone):
@@ -552,6 +559,26 @@ def diff(project: Project, base: dict[str, Any], cur: dict[str, Any], cur_verdic
             add(REVIEW, b, "targets", f"new possible targets: {', '.join(sorted(tb - ta))}")
         if a.get("evidence_status") != b.get("evidence_status"):
             add(REVIEW, b, "evidence", f"evidence {a.get('evidence_status')} → {b.get('evidence_status')}")
+    return changes
+
+
+def diff(project: Project, base: dict[str, Any], cur: dict[str, Any], cur_verdicts: dict[str, Any]) -> dict[str, Any]:
+    tree: Path = base["tree"]
+    binv = base["inventory"]
+    files = sorted(set(binv["files"]) | set(cur["files"]))
+    changed_files: dict[str, list[dict[str, Any]]] = {}
+    for rel in files:
+        old, new = tree / rel, project.root / rel
+        if old.exists() and new.exists() and sha256_file(old) == sha256_file(new):
+            continue
+        changed_files[rel] = _file_hunks(old, new)
+
+    bf = {f["id"]: f for f in binv["findings"]}
+    cf = {f["id"]: f for f in cur["findings"]}
+    changes = finding_changes(bf, cf, project.root, changed_files)
+
+    def add(sev: str, f: dict[str, Any], aspect: str, text: str, **extra: Any) -> None:
+        changes.append(_change(sev, f, aspect, text, **extra))
 
     # recipe verdicts
     bv = base.get("verdicts") or {}

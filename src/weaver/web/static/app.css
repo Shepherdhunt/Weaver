@@ -504,3 +504,13 @@ button.hbar:hover, button.hbar.on { background: var(--panel-2); }
 .risk-factors .w { display: inline-block; min-width: 26px; font-variant-numeric: tabular-nums; color: var(--muted); }
 td.num { font-variant-numeric: tabular-nums; text-align: right; }
 tr.sel td { background: var(--accent-soft); }
+
+.own-change { padding: 8px 0 0; }
+.pad-row { padding: 10px 16px 0; display: flex; gap: 8px; }
+.facts { margin: 4px 0 0; padding-left: 18px; font-size: 12px; }
+.facts li { margin: 2px 0; }
+.sev { font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: .04em; }
+.sev.high { color: var(--bad); }
+.sev.review { color: var(--warn, var(--accent)); }
+.field.check { display: flex; align-items: center; gap: 6px; }
+textarea.mono { width: 100%; box-sizing: border-box; font: 12px/1.45 var(--mono, ui-monospace, monospace); }

@@ -26,13 +26,25 @@ def render_card(txn: dict[str, Any]) -> str:
     out: list[str] = []
     add = out.append
 
+    is_patch = c["recipe"] == "patch"
     add(f"=== {txn['id']}  [{txn['state'].upper()}] ===")
     add("Candidate and source/configuration revision:")
-    add(
-        f"    {txn['finding_id']}: {f.get('kind')} '{f.get('name')}' in {f.get('function') or '<file scope>'}() "
-        f"at {f.get('file')}:{f.get('line')}:{f.get('col')}"
-    )
-    if rev.get("vcs"):
+    if is_patch:
+        from weaver.patch import origin_label
+
+        add(f"    {txn.get('title') or 'untitled change'}: {origin_label(txn.get('origin'))}")
+        names = (c.get("recheck") or {}).get("names", {})
+        add(
+            "    claims to remove: " + ", ".join(f"{k} '{v}'" for k, v in names.items())
+            if names
+            else "    names no pointer to remove: every change to pointer facts is reported"
+        )
+    else:
+        add(
+            f"    {txn['finding_id']}: {f.get('kind')} '{f.get('name')}' in {f.get('function') or '<file scope>'}() "
+            f"at {f.get('file')}:{f.get('line')}:{f.get('col')}"
+        )
+    if rev.get("vcs") and c["file_hashes"]:
         add(
             f"    revision {rev.get('commit', '?')[:12]}{' (dirty)' if rev.get('dirty') else ''}; "
             f"file sha256 {next(iter(c['file_hashes'].values()))[:12]}"
@@ -44,8 +56,9 @@ def render_card(txn: dict[str, Any]) -> str:
             + (f"; note: {u['note']}" if u.get("note") else "")
         )
 
-    add("Current pointer role and evidence:")
-    add(f"    type {f.get('type')!r}; uses {f.get('use_summary') or {}}; evidence {f.get('evidence_status')}")
+    if not is_patch or f.get("kind") != "patch":
+        add("Current pointer role and evidence:")
+        add(f"    type {f.get('type')!r}; uses {f.get('use_summary') or {}}; evidence {f.get('evidence_status')}")
 
     aff = c.get("affected", {})
     add("Objects, aliases, files, interfaces, and callers affected:")
@@ -55,10 +68,13 @@ def render_card(txn: dict[str, Any]) -> str:
     )
 
     add("Proposed recipe and target capabilities:")
-    add(
-        f"    {c['recipe']} v{c['recipe_version']}; CLite capabilities required: "
-        f"{c.get('capabilities_required') or 'none (C-to-C simplification)'}"
-    )
+    if is_patch:
+        add("    no recipe: the pointer facts of every affected unit are compared before and after the patch")
+    else:
+        add(
+            f"    {c['recipe']} v{c['recipe_version']}; CLite capabilities required: "
+            f"{c.get('capabilities_required') or 'none (C-to-C simplification)'}"
+        )
 
     add("Preconditions established / unresolved:")
     for p in c["preconditions"]:
@@ -94,6 +110,15 @@ def render_card(txn: dict[str, Any]) -> str:
     else:
         for r in val["records"]:
             add(f"    {r['outcome']:>13}  {r['kind']:<22} {r['name']}: {r['detail'][:160]}")
+            fx = r.get("facts")
+            if fx:
+                for t in fx.get("targets", []):
+                    add(f"          target {t['finding']} '{t['name']}': {t['status']}")
+                for label, items in (("removed", fx.get("removed", [])), ("added", fx.get("added", []))):
+                    for x in items[:12]:
+                        add(f"          {label}: {x['text']}")
+                for x in fx.get("review", [])[:20]:
+                    add(f"          REVIEW [{x['severity']}] {x.get('name') or ''} {x['text']}".replace("  ", " "))
         j = val.get("judgement") or {}
         if j.get("reasons"):
             add(f"    judgement: {j['state']} — " + "; ".join(j["reasons"]))

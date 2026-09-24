@@ -166,6 +166,11 @@ def analyze_unit(manifest: dict[str, Any], unit_dir: str, root: str) -> dict[str
         "file": manifest["file_rel"],
         "evidence_status": manifest.get("ast_evidence_status", EvidenceStatus.UNSUPPORTED.value),
     }
+    return analyze_tu(tu, base, root)
+
+
+def analyze_tu(tu: TranslationUnit | None, base: dict[str, Any], root: str) -> dict[str, Any]:
+    """Pointer facts of one loaded translation unit (``root``: what paths are made relative to)."""
     if tu is None:
         return {
             **base,

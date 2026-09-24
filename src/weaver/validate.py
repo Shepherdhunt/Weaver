@@ -24,6 +24,9 @@ from weaver.config import Project
 from weaver.evidence import ValidationKind, ValidationOutcome
 from weaver.frontend.clang_ast import TranslationUnit
 from weaver.frontend.wrappers import unwrapper_for
+from weaver.impact import _file_hunks
+from weaver.patch import RECIPE as PATCH_RECIPE
+from weaver.patch import FactCheck
 from weaver.recipes import CATALOG
 from weaver.rewrite import Edit, OffsetMap, apply_edits
 from weaver.store import Store
@@ -209,7 +212,10 @@ def run_validation(project: Project, txn: dict[str, Any], keep: bool = False) ->
     scratch.mkdir(parents=True, exist_ok=True)
     base_map = Remapper(project.root, base_ws)
     cand_map = Remapper(project.root, cand_ws)
-    recipe = CATALOG[cand["recipe"]]
+    # a hand-written or drafted patch has no recipe: its re-check compares pointer facts before and after
+    facts = FactCheck(cand) if cand["recipe"] == PATCH_RECIPE else None
+    recipe = None if facts is not None else CATALOG[cand["recipe"]]
+    hunks = {f: _file_hunks(base_ws / f, cand_ws / f) for f in affected} if facts is not None else {}
 
     # 1. compile every configuration that compiles an affected file ---------
     for prof in project.profiles:
@@ -272,6 +278,11 @@ def run_validation(project: Project, txn: dict[str, Any], keep: bool = False) ->
                 )
                 continue
             prod_macros = read_macros(store.unit_dir(prof.id, man["unit_id"]) / "unit.macros.txt")
+            if facts is not None:
+                rec = _patch_facts(facts, prof.id, name, rel, man, store, bc, cc, base_ws, cand_ws, scratch, hunks)
+                if rec is not None:
+                    records.append(rec)
+                continue
             ast_path, err = _ast_for(cc, man, scratch, prod_macros)
             if ast_path is None:
                 records.append(
@@ -292,6 +303,7 @@ def run_validation(project: Project, txn: dict[str, Any], keep: bool = False) ->
                 str(cand_ws),
                 unwrapper_for(man, store.unit_dir(prof.id, man["unit_id"])),
             )
+            assert recipe is not None
             problems = recipe.recheck(cand, tu, offset_maps, str(cand_ws))
             if problems is None:
                 continue  # the transaction's facts do not appear in this unit
@@ -305,6 +317,9 @@ def run_validation(project: Project, txn: dict[str, Any], keep: bool = False) ->
                     file=rel,
                 )
             )
+
+    if facts is not None:
+        records.append(facts.record(project))
 
     # 3. builds, tests and differential comparisons ---------------------------
     for prof in project.profiles:
@@ -404,6 +419,47 @@ def run_validation(project: Project, txn: dict[str, Any], keep: bool = False) ->
         "records": records,
         "workspace": str(wdir) if keep else None,
     }
+
+
+def _patch_facts(
+    facts: FactCheck,
+    profile: str,
+    name: str,
+    rel: str,
+    man: dict[str, Any],
+    store: Store,
+    bc: CompileCommand,
+    cc: CompileCommand,
+    base_ws: Path,
+    cand_ws: Path,
+    scratch: Path,
+    hunks: dict[str, Any],
+) -> dict[str, Any] | None:
+    """Analyse one affected unit before and after a patch; a record only when that is not possible."""
+    from weaver.analysis.inventory import analyze_tu
+
+    unit_dir = store.unit_dir(profile, man["unit_id"])
+    prod_macros = read_macros(unit_dir / "unit.macros.txt")
+    base = {
+        "unit_id": man["unit_id"],
+        "profile": profile,
+        "file": rel,
+        "evidence_status": man.get("ast_evidence_status"),
+    }
+    out: dict[str, Any] = {}
+    for label, c, ws in (("before", bc, base_ws), ("after", cc, cand_ws)):
+        d = scratch / label
+        d.mkdir(parents=True, exist_ok=True)
+        ast_path, err = _ast_for(c, man, d, prod_macros)
+        if ast_path is None:
+            status = ValidationOutcome.FAILED if label == "after" else ValidationOutcome.NOT_EVALUATED
+            what = "patched unit does not parse" if label == "after" else "the baseline does not parse"
+            return _record(ValidationKind.MECHANICAL_RECHECK, name, status, f"{what}: {err}", profile=profile, file=rel)
+        tu = TranslationUnit(ast_path, c.directory, c.file, str(ws), unwrapper_for(man, unit_dir))
+        out[label] = analyze_tu(tu, base, str(ws))
+        del tu
+    facts.add_unit(name, out["before"], out["after"], cand_ws, hunks)
+    return None
 
 
 def _run_spec(spec: Any, ws: Path, project: Project):

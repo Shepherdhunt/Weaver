@@ -404,7 +404,10 @@ def route(app: App, method: str, path: str, q: dict[str, str], body: dict[str, A
             return {**t, "card": render_card(t)}
         return [
             {
-                **{k: t.get(k) for k in ("id", "state", "recipe", "finding_id", "finding", "created_at")},
+                **{
+                    k: t.get(k)
+                    for k in ("id", "state", "recipe", "finding_id", "finding", "created_at", "title", "origin")
+                },
                 "strength": (t.get("acceptance") or {}).get("strength") or (t.get("validation") or {}).get("strength"),
             }
             for t in txns
@@ -414,6 +417,37 @@ def route(app: App, method: str, path: str, q: dict[str, str], body: dict[str, A
 
         t = app.exclusive(lambda: Ledger(proj).propose(body["finding"], body.get("recipe")))
         return {**t, "card": render_card(t)}
+    if (method, head) == ("POST", "patch"):
+        from weaver.card import render_card
+
+        removes = [str(x) for x in body.get("removes") or [] if str(x).strip()]
+        t = app.exclusive(
+            lambda: Ledger(proj).propose_patch(
+                str(body.get("diff") or ""), removes, str(body.get("title") or ""), {"kind": "manual"}
+            )
+        )
+        return {**t, "card": render_card(t)}
+    if (method, head) == ("POST", "draft"):
+        from weaver.llm.draft import draft
+
+        def work_draft(job: Job) -> Any:
+            # the model may take minutes and only reads; opening the transaction writes the ledger
+            res = draft(proj, body["finding"], propose=False, log=job.write)
+            if "patch" not in res:
+                job.write(str(res.get("error")))
+                return res
+            o = res["origin"]
+            f = api.find_finding_cached(proj, app.cache, body["finding"])
+            where = f"{f.get('function')}()" if f.get("function") else f.get("file")
+            t = app.exclusive(
+                lambda: Ledger(proj).propose_patch(
+                    res["patch"], [f["id"]], f"AI draft: remove '{f.get('name')}' in {where}", o
+                )
+            )
+            job.write(f"proposed {t['id']}: {t['state']}")
+            return {"txn": t["id"], "state": t["state"], "text": res["text"]}
+
+        return app.start("draft", "Draft a change with AI", work_draft, exclusive=False).to_json()
     if (method, head) == ("POST", "txn"):
         tid, action = parts[1], parts[2]
         led = Ledger(proj)

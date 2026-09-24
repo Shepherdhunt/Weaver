@@ -351,6 +351,7 @@ async function openSettings() {
     .map(([v, t]) => h("option", { value: v, text: t, selected: (st.flow.backend || "auto") === v })));
   const ai = st.ai || { enabled: false, provider: "anthropic", model: "", base_url: "", providers: [] };
   const aiEnabled = h("input", { type: "checkbox", id: "s-ai-on", checked: ai.enabled });
+  const aiDraftsBox = h("input", { type: "checkbox", id: "s-ai-drafts", checked: !!ai.drafts });
   const aiProvider = h("select", { id: "s-ai-provider", "aria-label": "AI provider" },
     [["anthropic", "Anthropic (Claude)"], ["openai-compatible", "OpenAI-compatible endpoint (OpenAI, Ollama, vLLM, LM Studio…)"]]
       .map(([v, t]) => h("option", { value: v, text: t, selected: ai.provider === v })));
@@ -372,6 +373,7 @@ async function openSettings() {
   syncAi();
   const aiSection = h("div", { class: "s-ai" },
     h("label", { class: "check" }, aiEnabled, " Show “Explain with AI” on each pointer"),
+    h("label", { class: "check" }, aiDraftsBox, " Also let the model draft patches (“Draft a change with AI”); this sends the affected functions' source, and every draft is validated like your own change"),
     h("div", { class: "hint", text: "Off: nothing is sent anywhere. On: Explain sends the selected pointer's evidence and nearby " +
       `source lines to the provider below, with your key. Every provider gets the same explanation guide (version ${ai.guide_version || 1}; ` +
       "“weaver ai guide” prints it) and must answer in the same sections." }),
@@ -412,7 +414,7 @@ async function openSettings() {
         const res = await api("settings", {
           acceptance: { require: [...req], allow_provisional: prov.checked, min_evidence: minEv.value },
           ...(conc.value === "__tasks__" ? {} : { concurrency: conc.value || null }), flow: { backend: backend.value },
-          ai: { enabled: aiEnabled.checked, provider: aiProvider.value, model: aiModel.value.trim(), base_url: aiUrl.value.trim() },
+          ai: { enabled: aiEnabled.checked, drafts: aiDraftsBox.checked, provider: aiProvider.value, model: aiModel.value.trim(), base_url: aiUrl.value.trim() },
           profiles: st.profiles.map((p) => ({ id: p.id, build: p.build || { run: "" }, tests: p.tests, compare: p.compare })),
         });
         close();
@@ -957,6 +959,11 @@ function renderDetail() {
           r.eligible ? "Propose…" : "Record as blocked"),
         null)));
   }
+  rsec.append(h("div", { class: "recipe-actions own-change" },
+    h("button", { class: "btn small", onclick: () => checkChange(f),
+      title: "Paste your own unified diff; Weaver checks it like a recipe's patch" }, "Check my change…"),
+    aiDrafts() ? h("button", { class: "btn small", onclick: () => draftChange(f.id),
+      title: `Ask ${S.state.ai.provider} (${S.state.ai.model || "model not set"}) to draft a patch; Weaver validates it like your own` }, "Draft a change with AI") : null));
   box.append(rsec);
 
   // uses
@@ -1020,6 +1027,61 @@ async function propose(fid, recipe) {
   } catch (e) { fail(e); }
 }
 
+function aiDrafts() { return aiOn() && !!S.state.ai.drafts; }
+
+function originLabel(t) {
+  const o = t.origin || {};
+  return o.kind === "ai" ? `AI draft (${o.provider}/${o.model})` : "hand-written";
+}
+
+function checkChange(f) {
+  const diff = h("textarea", { class: "mono", rows: 16, spellcheck: "false", "aria-label": "Unified diff",
+    placeholder: "--- a/src/file.c\n+++ b/src/file.c\n@@ -10,7 +10,7 @@\n ..." });
+  const title = h("input", { type: "text", placeholder: "What the change does", "aria-label": "Title" });
+  const rm = f ? h("input", { type: "checkbox", id: "chk-removes", checked: true }) : null;
+  const body = [
+    h("p", { class: "d-sub", text: "Paste a unified diff against the analysed tree (git diff, diff -u). Weaver opens a transaction and checks it like a recipe's patch: every affected configuration compiles, the pointer facts of every affected unit are compared before and after, contracts are re-checked, and the configured tests run on both trees. Line numbers may be approximate; hunks are placed by their content. Create or delete files outside Weaver." }),
+    h("div", { class: "field" }, h("label", { text: "Title" }), title),
+    h("div", { class: "field" }, h("label", { text: "Diff" }), diff),
+    f ? h("div", { class: "field check" }, rm, h("label", { for: "chk-removes", text: ` The change removes '${f.name}' (${f.id}): validation fails if it still exists` })) : null,
+  ];
+  modal("Check my change", body, (close) => [
+    h("button", { class: "btn primary", onclick: async () => {
+      try {
+        const t = await api("patch", { diff: diff.value, title: title.value, removes: f && rm.checked ? [f.id] : [] });
+        close(); await refreshState(); renderTabs(); openTxn(t);
+      } catch (e) { fail(e); }
+    } }, "Open transaction"),
+    h("button", { class: "btn ghost", onclick: close }, "Cancel")]);
+  diff.focus();
+}
+
+async function draftChange(fid) {
+  try {
+    const job = await api("draft", { finding: fid });
+    followJob(job, async (res) => {
+      if (res && res.txn) { await refreshState(); renderTabs(); openTxn(await api("ledger/" + res.txn)); return; }
+      modal("AI draft (not applied)", [h("p", { class: "d-sub", text: (res && res.error) || "The model's answer did not contain a patch that applies." }),
+        h("pre", { class: "diff", style: { whiteSpace: "pre-wrap" }, text: (res && res.text) || "" })],
+      (close) => [h("button", { class: "btn", onclick: close }, "Close")]);
+    });
+  } catch (e) { fail(e); }
+}
+
+function factsView(r) {
+  const fx = r.facts || {};
+  const out = [];
+  for (const t of fx.targets || []) out.push(h("div", {}, icon(t.status === "removed" ? "established" : "violated"),
+    ` ${t.name} (${t.finding}): ${t.status === "removed" ? "removed" : t.status === "present" ? "still exists" : "not in any affected unit"}`));
+  const list = (label, items) => items && items.length ? h("details", { class: "group" },
+    h("summary", { text: `${label} (${items.length})` }), h("ul", { class: "facts" }, items.map((x) => h("li", { text: x.text })))) : null;
+  out.push(list("Pointers removed", fx.removed), list("Pointers added", fx.added));
+  if (fx.review && fx.review.length) out.push(h("div", { class: "banner" }, h("b", { text: `Review before accepting (${fx.review.length}). ` }),
+    "Weaver does not judge whether these changes are intended; they are the facts that differ.",
+    h("ul", { class: "facts" }, fx.review.map((x) => h("li", {}, h("span", { class: `sev ${x.severity}`, text: x.severity }), ` ${x.name ? x.name + ": " : ""}${x.text}`)))));
+  return out;
+}
+
 function diffView(text) {
   const pre = h("pre", { class: "diff" });
   for (const line of (text || "").split("\n")) {
@@ -1043,14 +1105,17 @@ function modal(title, body, actions) {
 
 function openTxn(t) {
   const c = t.candidate;
+  const isPatch = c.recipe === "patch";
   const body = [];
   body.push(h("div", {}, h("span", { class: `state ${t.state}`, text: t.state.toUpperCase() }),
-    `  ${c.recipe} v${c.recipe_version} on '${t.finding.name}' in ${t.finding.function || t.finding.file}() — ${t.finding.file}:${t.finding.line}`));
+    isPatch ? `  ${t.title || "Untitled change"} — ${originLabel(t)}` + (Object.keys((c.recheck || {}).names || {}).length ? `; removes ${Object.values(c.recheck.names).map((n) => `'${n}'`).join(", ")}` : "")
+      : `  ${c.recipe} v${c.recipe_version} on '${t.finding.name}' in ${t.finding.function || t.finding.file}() — ${t.finding.file}:${t.finding.line}`));
   const v = t.validation;
   if (v && v.records) {
     const policy = (v.judgement && v.judgement.policy) || [];
     body.push(h("div", {}, h("h4", { text: "Validation" }),
       h("div", { class: "records" }, v.records.map((r) => h("div", {}, h("span", { class: r.outcome, text: r.outcome }), h("span", { text: r.kind }), h("span", { text: `${r.name}: ${r.detail}` })))),
+      ...v.records.filter((r) => r.facts).flatMap(factsView),
       policy.length ? h("div", { class: "d-sub", text: `Acceptance policy requires: ${policy.join(", ")}` + (policy.some((k) => k.includes("test")) ? "" : " (tests are not required)") }) : null,
       v.judgement && v.judgement.reasons.length ? h("div", { class: "d-sub", text: "Judgement: " + v.judgement.reasons.join("; ") }) : null,
       v.strength === "compile-only" ? h("div", { class: "banner" }, h("b", { text: "Compile-only. " }),
@@ -1059,7 +1124,9 @@ function openTxn(t) {
       h("div", { class: "d-sub", text: "Limits: tests and differential runs cover only exercised inputs; the mechanical re-check covers only analysed configurations. No universal proof is claimed." })));
   } else if (v && v.error) body.push(h("div", { class: "d-sub", style: { color: "var(--bad)" }, text: v.error }));
   if (t.patch) body.push(h("div", {}, h("h4", { text: `Patch (${c.edits.length} edit(s) in ${new Set(c.edits.map((e) => e.file)).size} file(s))` }), diffView(t.patch.diff)));
-  body.push(h("div", {}, h("h4", { text: "Why behavior is preserved" }), h("div", { class: "d-sub", text: c.preservation_argument })));
+  body.push(h("div", {}, h("h4", { text: isPatch ? "What Weaver checks" : "Why behavior is preserved" }), h("div", { class: "d-sub", text: c.preservation_argument })));
+  if (isPatch && (c.notes || []).length) body.push(h("div", { class: "d-sub" }, c.notes.map((n) => h("div", { text: n }))));
+  if (isPatch && t.origin && t.origin.kind === "ai" && t.origin.intent) body.push(h("div", {}, h("h4", { text: "The model's intent (advisory)" }), h("div", { class: "d-sub", style: { whiteSpace: "pre-wrap" }, text: t.origin.intent })));
   const ok = c.preconditions.filter((p) => p.status === "established").length;
   body.push(h("details", { class: "group", open: ok !== c.preconditions.length },
     h("summary", { text: `Preconditions (${ok} of ${c.preconditions.length} established)` }),
@@ -1277,8 +1344,10 @@ async function renderLedger(v) {
     v.append(h("div", { class: "banner" }, h("b", { text: val.level === "compile-only" ? "Validation is compile-only. " : "Tests are not required. " }),
       (val.notes || []).join(" ") + " ", h("a", { href: "#", onclick: (e) => { e.preventDefault(); openSettings(); } }, "Open settings")));
   }
+  v.append(h("div", { class: "pad-row" }, h("button", { class: "btn small", onclick: () => checkChange(null),
+    title: "Paste your own unified diff; Weaver checks it like a recipe's patch" }, "Check a change…")));
   if (!rows.length) {
-    v.append(h("div", { class: "pad d-sub", text: "No transactions yet. Select an eligible pointer and choose “Propose…”." }));
+    v.append(h("div", { class: "pad d-sub", text: "No transactions yet. Select an eligible pointer and choose “Propose…”, or check a change of your own." }));
     return;
   }
   v.append(h("table", { class: "table" },
@@ -1286,7 +1355,7 @@ async function renderLedger(v) {
     h("tbody", {}, rows.slice().reverse().map((t) => h("tr", { class: "click", onclick: async () => { try { openTxn(await api("ledger/" + t.id)); } catch (e) { fail(e); } } },
       h("td", { class: "mono", text: t.id }), h("td", {}, h("span", { class: `state ${t.state}`, text: t.state })),
       h("td", {}, t.strength ? h("span", { class: "tag" + (t.strength === "compile-only" ? " weak" : ""), text: t.strength === "compile-only" ? "compile only" : "tests" }) : ""),
-      h("td", { text: t.recipe }), h("td", { class: "mono", text: t.finding.name }),
+      h("td", { text: t.recipe === "patch" ? originLabel(t) : t.recipe }), h("td", { class: "mono", text: t.recipe === "patch" ? (t.title || t.finding.name) : t.finding.name }),
       h("td", { class: "mono", text: `${t.finding.file}:${t.finding.line} ${t.finding.function ? t.finding.function + "()" : ""}` }),
       h("td", { text: (t.created_at || "").replace("T", " ").replace("+00:00", "Z") }))))));
 }
@@ -1443,6 +1512,8 @@ const SNAP_ACTIONS = {
   "ai-key": ["Store key", "keeps your AI provider's API key in a file readable only by your account, outside the project.", "weaver ai key"],
   contracts: ["Pin contract", "records what must stay true of this pointer; later edits that break it are flagged in Changes.", "weaver contract pin P-… --expect read-only"],
   explain: ["Explain with AI", "sends the pointer's evidence to the AI provider the project chose, with your own key, for an advisory explanation in the guide's fixed sections (it never edits code).", "weaver explain P-… --dry-run"],
+  patch: ["Check a change", "opens a transaction for your own unified diff and checks it like a recipe's patch: it compiles every affected configuration, compares the pointer facts of every affected unit before and after, re-checks contracts and runs the tests on both trees.", "weaver patch change.diff --removes P-…"],
+  draft: ["Draft a change with AI", "asks the AI provider the project chose, with your own key, to draft a patch for this pointer from its evidence and the affected functions' source. The draft becomes a transaction like your own change: nothing is applied until it validates and you accept it.", "weaver draft P-…"],
   snapshots: ["Save a baseline", "freezes today's pointer facts, recipe verdicts and source tree.", "weaver snapshot save --name baseline"],
   impact: ["Compare", "explains how pointer behaviour changed since a baseline. The report on this page was recorded when the page was made.", "weaver impact --since baseline"],
 };

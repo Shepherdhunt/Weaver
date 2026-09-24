@@ -207,6 +207,17 @@ Done:
   Each time, every affected unit compiles, the mechanical re-check and full build pass, and the same
   112 ctest tests pass before and after the change. The first validation of `UT_ObjIdDecompose`
   failed, and that failure is how the discarded-output case was found.
+- Your own change (`weaver patch`, **Check my change…**): a unified diff becomes a transaction,
+  validated like a recipe's patch. Its re-check compares every affected unit's pointer facts before
+  and after the patch, fails when a named pointer survives or a contract breaks, and lists every other
+  change for review. On cFS, a hand-written patch removing the local alias `CmdPtr` in
+  `CFE_ES_StartPerfDataCmd` validates. `local-alias` refuses that pointer, because it is reached
+  through `data->`. The re-check finds the pointer removed and nothing else changed, the full build
+  passes, and the same 112 ctest tests pass before and after the change.
+- AI drafts (`weaver draft`, **Draft a change with AI**, behind `ai.drafts`): the model drafts a patch
+  under its own guide. Weaver applies it by content and asks once more if it does not apply, then
+  proposes it as a patch transaction under the same checks. Nothing is applied until the draft
+  validates and a person accepts it.
 
 Next:
 
@@ -272,7 +283,8 @@ which tell an engineer exactly what to change by hand, as for their patches.
 
 In rough order of value:
 
-1. **Validate your own patch.** Take a diff written by hand and run it through the same pipeline:
+1. **Validate your own patch** (done: `weaver patch`). Take a diff written by hand and run it
+   through the same pipeline:
    - compile in every configuration;
    - re-check that the pointer is gone and that nothing else changed;
    - run the tests and differential runs;
@@ -281,9 +293,9 @@ In rough order of value:
 
    This makes the manual majority of the work as checkable as the recipes, and fits the existing
    transaction model.
-2. **AI-drafted patches through the same gate.** For a blocked pointer, the configured model drafts a
-   change from the evidence slice under the shared guide, and Weaver validates it like a manual
-   patch. The model proposes; nothing is accepted without the checks. This reuses the
+2. **AI-drafted patches through the same checks** (done: `weaver draft`). For a blocked pointer,
+   the configured model drafts a change from the evidence slice under its own guide, and Weaver
+   validates it like a manual patch. The model proposes; nothing is accepted without the checks. This reuses the
    bring-your-own-key setup.
 3. **Coverage of the changed lines.** During validation, measure (gcov or llvm-cov) whether the
    tests executed the edited lines, and say so on the card. A passing suite that never runs the

@@ -154,6 +154,7 @@ class AIConfig:
     base_url: str | None = None
     api_key_env: str | None = None  # the environment variable holding the key (default per provider)
     tools: bool = True  # let the model call Weaver's read-only evidence tools
+    drafts: bool = False  # let the model draft patches (sends the affected functions' source)
     effort: str = "high"  # Claude only
     notes: Path | None = None  # project-specific notes appended to the explanation guide
 
@@ -183,7 +184,9 @@ def _ai(raw: Any, base: Path) -> AIConfig:
     if not raw:
         return AIConfig()
     if not isinstance(raw, dict):
-        raise ConfigError("ai: must be a mapping (enabled, provider, model, base_url, api_key_env, tools, notes)")
+        raise ConfigError(
+            "ai: must be a mapping (enabled, provider, model, base_url, api_key_env, tools, drafts, notes)"
+        )
     provider = str(raw.get("provider") or "anthropic")
     if provider not in AI_PROVIDERS:
         raise ConfigError(f"ai.provider: unknown provider {provider!r}; use {' or '.join(AI_PROVIDERS)}")
@@ -197,6 +200,7 @@ def _ai(raw: Any, base: Path) -> AIConfig:
         base_url=str(raw["base_url"]) if raw.get("base_url") else None,
         api_key_env=str(raw["api_key_env"]) if raw.get("api_key_env") else None,
         tools=bool(raw.get("tools", True)),
+        drafts=bool(raw.get("drafts", False)),
         effort=effort,
         notes=(base / str(raw["notes"])).resolve() if raw.get("notes") else None,
     )
@@ -429,11 +433,12 @@ acceptance:
   allow_provisional: false
   min_evidence: secondary-checked
 
-# AI explanations: optional and off by default.  Every provider gets the same
-# explanation guide ('weaver ai guide').  Keys never go in this file: set the
-# provider's environment variable, or store one for your account ('weaver ai key').
+# AI explanations and drafts: optional and off by default.  Every provider gets the
+# same guides ('weaver ai guide').  Keys never go in this file: set the provider's
+# environment variable, or store one for your account ('weaver ai key').
 ai:
   enabled: false
+  drafts: false                # also let the model draft patches (sends whole functions' source)
   provider: anthropic          # or openai-compatible: OpenAI, Ollama, vLLM, LM Studio...
   # model: claude-opus-5
   # base_url: http://localhost:11434/v1   # openai-compatible only; a local server keeps code on this machine

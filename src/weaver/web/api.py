@@ -137,11 +137,24 @@ def project_state(project: Project) -> dict[str, Any]:
     }
 
 
+def find_finding_cached(project: Project, cache: Cache, fid: str) -> dict[str, Any]:
+    from weaver.analysis.inventory import find_finding
+
+    inv, _ = cache.get(project)
+    return find_finding(inv, fid)
+
+
 def _ai_state(project: Project) -> dict[str, Any]:
     from weaver.llm.keys import key_status
 
     ai = project.ai
-    return {"enabled": ai.enabled, "provider": ai.provider, "model": ai.effective_model, "key": key_status(ai)}
+    return {
+        "enabled": ai.enabled,
+        "drafts": ai.enabled and ai.drafts,
+        "provider": ai.provider,
+        "model": ai.effective_model,
+        "key": key_status(ai),
+    }
 
 
 def pointer_list(project: Project, cache: Cache) -> dict[str, Any]:

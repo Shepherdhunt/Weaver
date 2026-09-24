@@ -118,6 +118,7 @@ def ai_settings(project: Project) -> dict[str, Any]:
         "key_env": ai.key_env,
         "key": key_status(ai),
         "tools": ai.tools,
+        "drafts": ai.drafts,
         "guide_version": GUIDE_VERSION,
         "providers": list(AI_PROVIDERS),
     }
@@ -177,6 +178,8 @@ def write_settings(project: Project, changes: dict[str, Any]) -> tuple[Project, 
         ai = dict(raw.get("ai") or {})
         if "enabled" in a:
             ai["enabled"] = bool(a["enabled"])
+        if "drafts" in a:
+            ai["drafts"] = bool(a["drafts"])
         if a.get("provider"):
             if a["provider"] not in AI_PROVIDERS:
                 raise ConfigError(f"ai.provider must be one of {', '.join(AI_PROVIDERS)}")

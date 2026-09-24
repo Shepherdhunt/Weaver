@@ -328,7 +328,10 @@ def test_ai_settings_and_key_through_the_browser(client, tmp_path, monkeypatch):
     res = client.api("settings", {"ai": {"enabled": True, "model": "m1", **local}})
     assert res["settings"]["ai"]["enabled"] and res["settings"]["ai"]["key"] == "missing"
     st = client.api("state")["ai"]
-    assert st == {"enabled": True, "provider": "openai-compatible", "model": "m1", "key": "missing"}
+    assert st == {"enabled": True, "drafts": False, "provider": "openai-compatible", "model": "m1", "key": "missing"}
+    # drafting patches is a second switch: it sends whole functions
+    assert client.api("settings", {"ai": {"drafts": True}})["settings"]["ai"]["drafts"] is True
+    assert client.api("state")["ai"]["drafts"] is True and "drafts: true" in client.app.project.config_path.read_text()
     assert client.api("ai-key", {"key": "sk-secret-123", **local})["key"].startswith("stored on this machine")
     for view in ("settings", "state"):
         assert "sk-secret-123" not in json.dumps(client.api(view))
@@ -336,4 +339,21 @@ def test_ai_settings_and_key_through_the_browser(client, tmp_path, monkeypatch):
     assert client.api("ai-key", {"forget": True, **local})["key"] == "missing"
     client.api("settings", {"ai": {"enabled": True, "provider": "openai-compatible", "model": ""}}, status=409)
     client.api("settings", {"ai": {"enabled": False}})
-    assert client.api("state")["ai"]["enabled"] is False
+    assert client.api("state")["ai"]["enabled"] is False and client.api("state")["ai"]["drafts"] is False
+
+
+@needs_clang
+def test_checking_your_own_change_through_the_browser(client):
+    diff = (
+        "--- a/src/util.c\n+++ b/src/util.c\n@@ -10,4 +10,4 @@\n int util_seen(void)\n {\n"
+        "-    return last_seen ? *last_seen : -1;\n+    return last_seen != 0 ? *last_seen : -1;\n }\n"
+    )
+    t = client.api("patch", {"diff": diff, "title": "explicit null test", "removes": []})
+    assert t["state"] == "proposed" and t["recipe"] == "patch" and t["origin"] == {"kind": "manual"}
+    assert "a hand-written change" in t["card"] and "+    return last_seen != 0" in t["patch"]["diff"]
+    row = next(r for r in client.api("ledger") if r["id"] == t["id"])
+    assert row["title"] == "explicit null test" and row["recipe"] == "patch"
+    bad = client.api("patch", {"diff": diff.replace("last_seen ?", "seen ?"), "title": "stale"})
+    assert bad["state"] == "blocked" and "does not match" in json.dumps(bad["candidate"]["preconditions"])
+    for x in (t, bad):
+        client.api(f"txn/{x['id']}/skip", {})

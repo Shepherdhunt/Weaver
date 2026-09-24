@@ -138,6 +138,8 @@ Task ownership and scale make the interface recipes usable on multi-task program
 | `simplify.py` | tracker roadmap | The simplification checker: rule catalogue, target profiles (CLite provisional, no pointers, modular redesign, project-defined), and each function's remaining constructs from the inventory's pointer operations, calls, writes and per-function AST constructs. |
 | `web/export.py` | — | `weaver export-ui`: records the interface's read-only answers (optionally for a scope) into one HTML page that needs no server. |
 | `testdetect.py`, `settings.py` | tracker §7 | Detecting a project's test commands (Make, CTest, Meson, scripts), and editing validation commands and the acceptance policy in `weaver.yaml` with a backup and reload check. |
+| `patch.py` | — | Your own change as a transaction: unified diffs placed by content, edits bound to file hashes, `PATCH.*` checks at proposal, and the pointer-fact re-check (every affected unit analysed before and after, compared with change impact's rules; named pointers and contracts decide the outcome, everything else is listed for review) |
+| `llm/draft.py`, `data/draft_guide.md` | tracker §10 | AI drafts behind `ai.drafts`: the drafting guide, the evidence slice with the exact source of the function, its callers and declarations, diff extraction, one repair round, and the proposal as a patch transaction |
 
 ## Design decisions
 
@@ -366,6 +368,30 @@ used, which is an error under `-Werror`; validating on cFS caught exactly that. 
 also assigned elsewhere blocks the candidate, since removing it would need dead-store elimination.
 The flag is `bool` with `true`/`false` when the unit has `<stdbool.h>`, `_Bool` with `1`/`0`
 otherwise.
+
+**Your own change is checked by what it does to pointer facts.** A recipe states its own
+post-conditions; a patch written by hand, or drafted by a model, states only which pointers it means
+to remove. Validation therefore analyses every affected unit twice, from the baseline workspace and
+from the patched one, with the same frontend as the evidence. It compares their findings with change
+impact's rules: pointers removed and added, uses that appeared, types and access classes that
+changed. The re-check fails only on what the author claimed or the project pinned: a named pointer
+that still exists, or a pinned or implied contract that no longer holds. `borrowed` follows every
+call, so it is left to `weaver check` after acceptance. Every other change is listed for review,
+with its severity, because Weaver cannot know whether it was intended. Compile, tests and
+differential runs are the same as for a recipe, and so are acceptance, the checkpoint and revert.
+Diffs are placed by content: a hunk's context and removed lines must appear in the file, at the
+stated line or at the nearest place after the previous hunk (trailing blanks ignored). Context lines
+keep the file's own text, and new or deleted files stay outside Weaver.
+
+**An AI draft is a patch like any other.** The model gets a drafting guide of its own (the same for
+every provider), the evidence slice, and the exact current source of the declaring function, its
+direct callers and its other declarations. It answers in fixed sections, and its patch goes in a
+`diff` block. Weaver applies the draft by content; if it does not apply, Weaver asks once more with
+the reason. The draft then becomes a patch transaction that names the pointer it must remove, and
+it is validated and reviewed exactly as a hand-written change would be. Drafts need a second switch
+(`ai.drafts`) because they send whole functions, not just the evidence around a pointer. The
+transcript records every attempt, and the transaction records the provider, model, guide version
+and the model's stated intent, which is labelled advisory.
 
 **Risk is a transparent ordering, not a prediction.** Each factor is a fact Weaver already
 establishes (a cast to an integer, pointer arithmetic, an unknown or heap target, a concurrent
