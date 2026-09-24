@@ -31,7 +31,7 @@ from typing import Any
 from weaver.capture.compdb import load_compdb
 from weaver.config import Profile, Project
 from weaver.evidence import EvidenceStatus
-from weaver.fidelity.layout import layout_probe
+from weaver.fidelity.layout import layout_probe, macro_values
 from weaver.frontend.lexer import lex
 from weaver.frontend.preproc import active_lines, conditional_segments
 from weaver.frontend.wrappers import transparent_wrappers
@@ -191,6 +191,7 @@ def check_unit(project: Project, profile: Profile, m: dict[str, Any], idents: _I
     pm, sm = read_macros(udir / "unit.macros.txt"), read_macros(udir / "secondary.macros.txt")
     wrappers = transparent_wrappers(pm, sm) if pm and sm else {}
     diff_relevant, diff_other, forwarding, spacing, conditional_only = [], [], [], [], []
+    relevant_names: list[str] = []
     for name in sorted(set(pm) | set(sm)):
         a, b = pm.get(name), sm.get(name)
         if a == b:
@@ -206,13 +207,27 @@ def check_unit(project: Project, profile: Profile, m: dict[str, Any], idents: _I
             continue
         if name in visible:
             diff_relevant.append(desc)
+            relevant_names.append(name)
         elif name in conditional:
             # Only tested by #if/#ifdef in project files: its whole effect is which lines are
             # compiled, and the active-code comparison below checks exactly that.
             conditional_only.append(desc)
         elif not name.startswith(IDENTITY_PREFIXES):
             diff_other.append(desc)
+    same_value: list[str] = []
+    if layout:
+        # GCC's limits.h writes INT_MIN as (-INT_MAX - 1), Clang's as (-__INT_MAX__ -1): different text,
+        # the same constant.  Compile each object-like one with both compilers and compare the values.
+        objlike = [n for n in relevant_names if not (pm.get(n) or "").startswith("(fn)") and n in pm and n in sm]
+        same = macro_values(m, udir, objlike)
+        same_value = [n for n in objlike if same.get(n)]
+        diff_relevant = [d for d, n in zip(diff_relevant, relevant_names) if n not in same_value]
     findings += [f"macro observable by project code differs: {d}" for d in diff_relevant]
+    if same_value:
+        notes.append(
+            "macros spelled differently with the same value under both compilers (size, signedness and "
+            f"value compared): {', '.join(same_value)}"
+        )
     if forwarding:
         notes.append(
             "secondary-only forwarding wrappers (every argument passed once, unchanged, to the fortified "
@@ -229,6 +244,7 @@ def check_unit(project: Project, profile: Profile, m: dict[str, Any], idents: _I
         "relevant": diff_relevant,
         "forwarding": forwarding,
         "spacing_only": spacing,
+        "same_value": same_value,
         "conditional_only": conditional_only,
         "not_referenced": diff_other[:200],
         "not_referenced_count": len(diff_other),

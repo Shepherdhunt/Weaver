@@ -32,6 +32,7 @@ int get_rec(rec_t *out);
 int reads_back(int *io);
 int in_cond(int *out);
 int count_pos(int a, int b, int *out);
+int flag_of(int *out);
 
 #endif
 """
@@ -88,6 +89,12 @@ int count_pos(int a, int b, int *out)
         return 1;
     *out = b;
     return 0;
+}
+
+int flag_of(int *out)
+{
+    *out = 2;
+    return 1;
 }
 """
 
@@ -200,6 +207,15 @@ int main(void)
     int c2 = count_pos(5, 2, &k2);
     printf("pr=%d lv=%d ms=%d kk=%d m=%d,%d,%d,%d\\n", pr.b, lv, ms, kk, m1, m2, m3, m4);
     printf("k=%d,%d c=%d,%d\\n", k1, k2, c1, c2);
+    int ce = 0, w2 = 0, f1 = 0;
+    if (r > 100)
+        printf("big\\n");
+    else if (in_cond(&ce))
+        printf("ce %d\\n", ce);
+    if (read_value(1, &w2) != READ_OK)
+        return 1;
+    if (r > 0 && flag_of(&f1))
+        printf("f1 %d w2 %d\\n", f1, w2);
     return 0;
 }
 """
@@ -281,12 +297,14 @@ def test_blockers_are_explained(outp):
     r = _eval(outp)
     assert set(r) == {
         "read_value", "partial", "reads_back", "in_cond", "square", "fill_global", "get_rec", "twice", "leaf",
-        "leaf2", "maybe_set", "set_if", "count_pos",
+        "leaf2", "maybe_set", "set_if", "count_pos", "flag_of",
     }  # fmt: skip
     _, res = r["reads_back"]
     assert _pre(res, "OP.write-only").status == "violated"
-    _, res = r["in_cond"]
+    _, res = r["flag_of"]  # after '&&' the call may not run: it cannot be computed before the if
     assert "used inside a larger expression" in " ".join(_pre(res, "OP.call-sites").evidence)
+    _, res = r["in_cond"]  # 'if (in_cond(&c))' and 'else if (in_cond(&ce))': computed just before the if
+    assert _pre(res, "OP.call-sites").status == "established"
     _, res = r["fill_global"]
     assert "passes &g_value" in " ".join(_pre(res, "OP.private-target").evidence)
     _, res = r["twice"]  # the caller only assigns d0: dropping it would need dead-store elimination
@@ -314,6 +332,12 @@ def test_optional_output_and_leaf_first(outp):
     assert "forward the caller's own pointer parameter" in " ".join(_pre(res, "OP.private-target").evidence)
     assert any("mid()'s parameter 'o' is then only written" in n for n in res.notes)
     assert "mid" not in r  # mid() only passes 'o' on: not a candidate until leaf() returns the value
+    # scalar-input applies to 'partial' too, but only output-param can apply the change: propose takes that one
+    from weaver.ledger import Ledger
+
+    txn = Ledger(load_project(outp)).propose(r["partial"][0]["id"])
+    assert txn["recipe"] == "output-param" and txn["state"] == "proposed"
+    assert run_cli(outp, "skip", txn["id"]) == 0
 
 
 @needs_build
@@ -330,7 +354,7 @@ def test_every_form_is_applied_and_preserves_behaviour(outp):
     # convert, validate and accept every eligible candidate, re-analysing after each: leaf() comes first, and
     # mid() becomes eligible once its parameter is only written
     assert run_cli(outp, "auto", "--recipe", "output-param", "--max", "20") == 0
-    done = {f for f in ("square", "read_value", "partial", "count_pos", "leaf", "mid", "maybe_set", "set_if")}
+    done = {"square", "read_value", "partial", "count_pos", "leaf", "mid", "maybe_set", "set_if", "in_cond"}
     assert not done & set(_eval(outp)), sorted(done & set(_eval(outp)))
 
     main = (outp / "main.c").read_text()
@@ -357,7 +381,13 @@ def test_every_form_is_applied_and_preserves_behaviour(outp):
     # optional outputs: the caller assigns only what was written
     assert re.search(rf"int q = (partial_r\d+)\.status;{ws}if \(\1\.has_value\) p = \1\.value;", main)
     assert "_Bool has_value;" in lib_h and "int count_pos_written = 0;" not in lib_c
-    assert "_Bool out_written = 0;" in lib_c and "*out" not in lib_c.split("count_pos", 1)[1]
+    # a call in an if condition: the result is computed in a block just before the statement
+    assert re.search(
+        rf"\{{{ws}in_cond_result_t (in_cond_r\d+) = in_cond\(\);{ws}c = \1\.value;{ws}if \(\1\.status\){ws}printf", main
+    )
+    assert re.search(rf"else \{{{ws}in_cond_result_t (in_cond_r\d+) = in_cond\(\);{ws}ce = \1\.value;{ws}if \(\1", main)
+    assert re.search(rf"w2 = (read_value_r\d+)\.value;{ws}if \(\1\.status != READ_OK\)", main)
+    assert "_Bool out_written = 0;" in lib_c and "*out" not in lib_c.split("count_pos", 1)[1].split("flag_of", 1)[0]
     assert ".has_value = out_written}" in lib_c and "out = b; out_written = 1;" in lib_c
     assert "{ out = a; out_written = 1; }" in main  # braces keep the flag under the if
     assert "return (set_if_result_t){.has_value = 0};" in main
@@ -366,3 +396,81 @@ def test_every_form_is_applied_and_preserves_behaviour(outp):
     assert "o = leaf(a);" in main and "leaf(a, o)" not in main and "static mid_result_t mid(int a)" in main
     assert re.search(rf"(mid_r\d+) = mid\(4\);{ws}int ms = \1\.status;{ws}lv = \1\.value;", main)
     assert _run(outp) == before  # the program prints exactly what it printed before
+
+
+C89_C = """\
+#include <stdio.h>
+
+static int parse(const char *s, unsigned *out)
+{
+    unsigned v = 0;
+    if (*s < '0' || *s > '9')
+        return 0;
+    while (*s >= '0' && *s <= '9')
+        v = v * 10 + (unsigned)(*s++ - '0');
+    *out = v;
+    return 1;
+}
+
+static int twice(int a, int *out)
+{
+    *out = 2 * a;
+    return 0;
+}
+
+int main(int argc, char **argv)
+{
+    unsigned n = 0;
+    int k = 0;
+    int st = twice(argc, &k);
+    int after = k + st;
+    (void)argv;
+    if (!parse(argc > 1 ? "x" : "42", &n))
+        return 1;
+    printf("%u %d\\n", n, after);
+    return 0;
+}
+"""
+
+
+@needs_build
+def test_c89_units_get_c89_code(tmp_path):
+    from weaver.capture.shims import finalize, make_shim
+
+    root = tmp_path / "c89"
+    root.mkdir()
+    (root / "app.c").write_text(C89_C)
+    (root / "Makefile").write_text(MAKEFILE.replace("-std=c11 -Wall", "-std=c89 -pedantic -Wall").replace(
+        "main.c lib.c lib.h", "app.c").replace("main.c lib.c", "app.c"))  # fmt: skip
+    cap = root / ".weaver" / "capture"
+    shim = make_shim(cap / "shims", "cc", shutil.which("clang"), cap / "log.jsonl")
+    subprocess.run(["make", "-s", f"CC={shim}", "BUILD=build"], cwd=root, check=True)
+    finalize(cap / "log.jsonl", root / "build")
+    val = {
+        "build": {"run": ["make", "-s", "-C", "{workspace}", "CC=clang", "BUILD=out"], "cwd": "{workspace}"},
+        "compare": [{"name": "app", "run": ["./out/app"], "cwd": "{workspace}"}],
+        "coverage": False,
+    }
+    cfg = {
+        "schema": "weaver.project/1",
+        "project": {"name": "c89", "workspace_exclude": [".git", "build", "out"]},
+        "acceptance": {"require": ["compile", "mechanical-recheck", "differential-testing"]},
+        "profiles": [{"id": "clang", "compile_commands": "build/compile_commands.json", "validation": val}],
+    }
+    (root / "weaver.yaml").write_text(yaml.safe_dump(cfg, sort_keys=False))
+    assert run_cli(root, "refresh") == 0
+    r = _eval(root)
+    _, res = r["twice"]  # C89: 'int st = ...' would become a statement followed by the declaration of 'after'
+    assert "C89: receiving the value is a statement" in " ".join(_pre(res, "OP.call-sites").evidence)
+    _, res = r["parse"]
+    assert res.eligible, [p.to_json() for p in res.preconditions if p.status != "established"]
+    assert run_cli(root, "auto", "--recipe", "output-param") == 0
+    app = (root / "app.c").read_text()
+    # no _Bool, compound literal or designated initialiser; the call in the condition is computed first
+    assert "_Bool" not in app and "){." not in app and "int has_value;" in app
+    assert "static parse_result_t parse_result(int status, unsigned value, int has_value)" in app
+    assert "return parse_result((0), 0, 0);" in app and "return parse_result((1), out, 1);" in app
+    assert re.search(r"\{\s+parse_result_t (parse_r\d+) = parse\(argc > 1 \? \"x\" : \"42\"\);\s+"
+                     r"if \(\1\.has_value\) n = \1\.value;\s+if \(!\1\.status\)", app)  # fmt: skip
+    subprocess.run(["make", "-s", "CC=clang", "BUILD=check"], cwd=root, check=True)  # -std=c89 -pedantic -Werror
+    assert subprocess.run(["./check/app"], cwd=root, capture_output=True, text=True).stdout == "42 2\n"

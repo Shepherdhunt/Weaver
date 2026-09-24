@@ -37,7 +37,7 @@ mkdir -p out
 $CC -c lib/util.c -o out/util.o
 $CC -c lib/unused.c -o out/unused.o
 ar rcs out/libutil.a out/util.o out/unused.o
-$CC -fPIC -c plug/plugin.c -o out/plugin.o
+(cd out && $CC -fPIC -c ../plug/plugin.c)
 $CC -shared -o out/plugin.so out/plugin.o out/libutil.a
 $CC -c app/main.c -o out/main.o
 $CC -o out/app out/main.o out/libutil.a
@@ -69,7 +69,8 @@ def _mini(tmp: Path, programs: list | None = None) -> Path:
 @needs_binutils
 def test_capture_excludes_probes_and_configured_paths(tmp_path):
     root, res = _mini(tmp_path)
-    files = sorted(Path(e["file"]).as_posix() for e in json.loads((root / "build/compile_commands.json").read_text()))
+    entries = json.loads((root / "build/compile_commands.json").read_text())
+    files = sorted((Path(e["directory"]) / e["file"]).resolve().relative_to(root.resolve()).as_posix() for e in entries)
     assert files == ["app/main.c", "lib/unused.c", "lib/util.c", "plug/plugin.c"]
     other = json.loads((root / "build/other-invocations.json").read_text())
     matched = sorted(m for x in other["excluded"] for m in x["matched"])
@@ -89,6 +90,7 @@ def test_link_model_images_archives_and_programs(tmp_path):
     # the traced link loads only the archive member that resolves a symbol
     assert unit["util.c"] in app.units and unit["unused.c"] not in app.units
     assert {"plugin_entry", "plugin_helper"} <= plug.exports
+    assert unit["plugin.c"] in plug.units  # compiled with no -o: the object is plugin.o in the compile's directory
     progs = {p.name: p for p in lm.programs}
     assert progs["app"].closed and progs["app"].entry_points == ["main"]
     assert not progs["plugin.so"].closed  # an unconfigured shared object is an open program
@@ -278,3 +280,30 @@ def test_report_on_the_demo(tmp_path):
     md = render_markdown(rep)
     for heading in ("# Weaver report: demo (src/alias.c)", "## Evidence", "## Recipes", "### Eligible", "### Blocked"):
         assert heading in md
+
+
+@needs_binutils
+def test_capture_records_the_flags_a_makefile_puts_in_cc(tmp_path):
+    # 'make CC={cc}' would replace 'gcc -DFROM_MAKEFILE=1'; the shim first on PATH records it as the build ran it
+    root = tmp_path / "ccflags"
+    root.mkdir()
+    (root / "a.c").write_text("int f(int *p) { return FROM_MAKEFILE + *p; }\n")
+    (root / "Makefile").write_text("CC = gcc -DFROM_MAKEFILE=1\na.o: a.c\n\t$(CC) -c a.c\n")
+    cfg = {
+        "schema": "weaver.project/1",
+        "project": {"name": "ccflags"},
+        "profiles": [
+            {
+                "id": "gcc",
+                "compile_commands": "build/compile_commands.json",
+                "capture": {"command": "make -B a.o", "tools": {"gcc": shutil.which("gcc")}},
+                "secondary_frontend": False,
+            }
+        ],
+    }
+    (root / "weaver.yaml").write_text(yaml.safe_dump(cfg))
+    from weaver.pipeline import build_capture
+
+    build_capture(load_project(root), lambda m: None)
+    (entry,) = json.loads((root / "build/compile_commands.json").read_text())
+    assert "-DFROM_MAKEFILE=1" in entry["arguments"] and entry["output"] == "a.o"

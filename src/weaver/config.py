@@ -10,6 +10,7 @@ Weaver never infers a target from an OS or product name.
 from __future__ import annotations
 
 import os
+import shutil
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -72,6 +73,7 @@ class ValidationSpec:
 class SecondaryFrontend:
     compiler: str  # path or name of the analysis Clang
     extra_args: list[str] = field(default_factory=list)
+    auto: bool = False  # not configured: the Clang found on PATH, used only for non-Clang production compilers
 
 
 @dataclass
@@ -289,6 +291,10 @@ def load_project(path: str | os.PathLike[str] | None = None) -> Project:
                 compiler=str(sec.get("compiler", "clang")),
                 extra_args=[str(a) for a in sec.get("extra_args", [])],
             )
+        elif "secondary_frontend" not in pr and shutil.which("clang"):
+            # GCC and other compilers give no AST Weaver can read; without this every unit of such a profile
+            # would be collected without pointer facts.  'secondary_frontend: false' turns it off.
+            secondary = SecondaryFrontend(compiler="clang", auto=True)
         val = pr.get("validation") or {}
         validation = ValidationSpec(
             build=CommandSpec.parse(val["build"], "build") if val.get("build") else None,
@@ -458,8 +464,9 @@ profiles:
     platform:
       os_version: recorded_os_version
       runtime_mode: recorded_kernel_process_partition_or_bare_metal
-    # For a non-Clang production compiler, name the analysis Clang here:
-    # secondary_frontend: {{compiler: clang}}
+    # For a non-Clang production compiler Weaver reads the AST with a Clang ("secondary frontend",
+    # checked against the production compiler). Default: the clang on PATH. Name another, or turn it off:
+    # secondary_frontend: {{compiler: clang-18}}      # or: secondary_frontend: false
     validation:
       # build: {{run: [make, -C, "{{workspace}}"], cwd: "{{workspace}}"}}
       # tests:   [{{name: unit, run: ["./build/tests"], cwd: "{{workspace}}"}}]

@@ -118,6 +118,7 @@ def project_state(project: Project) -> dict[str, Any]:
                     "compile_commands_exist": p.compile_commands.exists(),
                     "capture": bool(p.capture),
                     "secondary": p.secondary_frontend.compiler if p.secondary_frontend else None,
+                    "secondary_default": bool(p.secondary_frontend and p.secondary_frontend.auto),
                     "target": p.target,
                 }
                 for p in project.profiles

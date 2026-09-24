@@ -631,7 +631,7 @@ def _load_fidelity(store: Store, project: Project, manifests: list[dict[str, Any
     out: dict[str, str] = {}
     for m in manifests:
         p = store.fidelity_dir(m["profile"]) / f"{m['unit_id']}.json"
-        if p.exists() and m.get("ast_artifact", "").startswith("secondary."):
+        if p.exists() and (m.get("ast_artifact") or "").startswith("secondary."):
             rec = read_json(p)
             if rec.get("file_sha256") == m["file_sha256"] and rec.get("cache_key") == m.get("cache_key"):
                 out[m["unit_id"]] = rec["evidence_status"]

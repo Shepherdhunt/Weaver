@@ -14,6 +14,7 @@ import subprocess
 from pathlib import Path
 
 import pytest
+import yaml
 from conftest import FIXTURE, build_project, needs_clang, needs_gcc, run_cli, validation_for
 
 from weaver.analysis.inventory import load_inventory
@@ -281,6 +282,19 @@ def test_fidelity_detects_observable_macro_difference(tmp_path):
     assert edge["evidence_status"] == "secondary-checked"  # SCALE is not visible to edge.c
 
 
+@needs_gcc
+def test_fidelity_compares_differently_spelled_macros_by_value(tmp_path):
+    # GCC's limits.h spells INT_MIN '(-INT_MAX - 1)', Clang's '(-__INT_MAX__ -1)': the same constant
+    root = build_project(
+        tmp_path, [{"id": "gcc", "cc": "gcc", "secondary": {"compiler": "clang", "extra_args": ["-DSCALE=(2-1)"]}}]
+    )
+    run_cli(root, "collect")
+    alias = next(u for u in cli_json(root, "fidelity")["units"] if u["file"] == "src/alias.c")
+    assert alias["evidence_status"] == "secondary-checked", alias["findings"]
+    assert alias["macro_differences"]["same_value"] == ["SCALE"]
+    assert any("spelled differently with the same value" in n and "SCALE" in n for n in alias["notes"])
+
+
 @needs_clang
 def test_probe_reports_capabilities(clang_project):
     res = cli_json(clang_project, "probe")
@@ -292,3 +306,23 @@ def test_probe_reports_capabilities(clang_project):
 def test_fixture_is_pristine():
     # Guard against tests mutating the checked-in fixture.
     assert "unsigned *p = &total;" in (FIXTURE / "src/alias.c").read_text()
+
+
+@needs_gcc
+def test_gcc_profiles_read_the_ast_with_clang_unless_turned_off(tmp_path, capsys):
+    # No secondary_frontend in the profile: the clang on PATH reads the AST, and the inventory has findings
+    root = build_project(tmp_path, [{"id": "gcc", "cc": "gcc"}])
+    sec = load_project(root).profiles[0].secondary_frontend
+    assert sec is not None and sec.auto and sec.compiler == "clang"
+    assert run_cli(root, "refresh", "--no-flow") == 0
+    assert "no AST evidence" not in capsys.readouterr().out
+    assert load_inventory(load_project(root))["findings"]
+    # turned off: nothing can read the units, and refresh says so instead of reporting an empty inventory
+    cfg = yaml.safe_load((root / "weaver.yaml").read_text())
+    cfg["profiles"][0]["secondary_frontend"] = False
+    (root / "weaver.yaml").write_text(yaml.safe_dump(cfg, sort_keys=False))
+    assert load_project(root).profiles[0].secondary_frontend is None
+    assert run_cli(root, "refresh", "--no-flow") == 0
+    out = capsys.readouterr().out
+    assert "WARNING:" in out and "have no AST evidence" in out and "secondary_frontend" in out
+    assert not load_inventory(load_project(root))["findings"]

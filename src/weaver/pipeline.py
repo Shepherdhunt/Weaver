@@ -46,10 +46,13 @@ def build_capture(project: Project, log: Log = _print) -> dict[str, Any]:
             subprocess.run(argv, cwd=cwd, env={**os.environ, **env}, check=False)
         argv, cwd, env = cap.command.render(**subst)
         log(f"[{prof.id}] build: {' '.join(argv)}")
+        # The shims also go first on PATH under the tools' own names: a Makefile that says
+        # 'CC = gcc -std=c89' is recorded with its flags, which 'make CC={cc}' would replace.
+        path = os.pathsep.join([str(cdir / "shims"), env.get("PATH") or os.environ.get("PATH", "")])
         p = subprocess.run(
             argv,
             cwd=cwd,
-            env={**os.environ, **env},
+            env={**os.environ, **env, "PATH": path},
             capture_output=True,
             text=True,
             timeout=cap.command.timeout,
@@ -95,11 +98,18 @@ def refresh(
             counts: dict[str, int] = {}
             for u in fr.get("units", []):
                 counts[u["evidence_status"]] = counts.get(u["evidence_status"], 0) + 1
-            log(f"[{prof.id}] fidelity: {counts or 'no secondary units'}")
+            if counts or not prof.secondary_frontend.auto:  # the default Clang is silent for Clang builds
+                log(f"[{prof.id}] fidelity: {counts or 'no secondary units'}")
             summary.setdefault("fidelity", {})[prof.id] = counts
     inv = build_inventory(project, jobs=jobs)
     s = inv["summary"]
     log(f"inventory: {s['findings']} finding(s) in {s['units']} unit(s); {s['unexamined_lines']} unexamined line(s)")
+    if s.get("units_without_ast"):
+        log(
+            f"WARNING: {s['units_without_ast']} of {s['units']} unit(s) have no AST evidence, so none of their "
+            "pointers are in the inventory. For a GCC or other non-Clang compiler, install clang or set "
+            "'secondary_frontend: {compiler: <clang>}' in the profile; 'weaver probe' shows what each profile supports."
+        )
     summary["inventory"] = s
     run_it = flow if flow is not None else bool(project.flow.svf_enabled and find_wpa(project))
     if run_it:

@@ -83,6 +83,78 @@ def _probe_source(main_file: str, qs: list[tuple[str, str]]) -> str:
     return "\n".join(lines) + "\n"
 
 
+def _build_both(
+    m: dict[str, Any], udir: Path, src: Path, stem: str, prefix: str
+) -> tuple[dict[str, int] | None, dict[str, int] | None, str | None]:
+    """Compile a probe with the production compiler and the secondary frontend; the probe symbols' sizes."""
+    tr = m.get("translation") or {}
+    sec_tool = (m.get("secondary_tool") or {}).get("path")
+    if not sec_tool or not tr.get("options"):
+        return None, None, "no secondary frontend translation recorded"
+    prod_o, sec_o = udir / f"{stem}.prod.o", udir / f"{stem}.sec.o"
+    prod_cmd = [m["sanitized"]["compiler"], *m["sanitized"]["options"], "-w", "-c", str(src), "-o", str(prod_o)]
+    rsp = udir / "secondary.clang.rsp"  # the translated options plus the profile's extra_args, as collected
+    sec_opts = [f"@{rsp}"] if rsp.exists() else list(tr["options"])
+    sec_cmd = [sec_tool, *sec_opts, "-w", "-c", str(src), "-o", str(sec_o)]
+    rp = run(prod_cmd, cwd=m["directory"], timeout=600)
+    if not rp.ok:
+        return None, None, f"production compiler rejected the probe: {rp.stderr_text(800)}"
+    rs = run(sec_cmd, cwd=m["directory"], timeout=600)
+    if not rs.ok:
+        return None, None, f"secondary frontend rejected the probe: {rs.stderr_text(800)}"
+    ps, ss = symbol_sizes(prod_o, prefix), symbol_sizes(sec_o, prefix)
+    if ps is None or ss is None:
+        return None, None, "object format is not ELF; use a native layout report"
+    return ps, ss, None
+
+
+def _macro_source(main_file: str, names: list[str]) -> str:
+    lines = [
+        f'#include "{main_file}"',
+        "/* Weaver macro probe: size, signedness and each byte of the value, as (answer + 1) array sizes. */",
+    ]
+    for i, n in enumerate(names):
+        lines.append(f"char weaver_mv_{i}_z[sizeof({n}) + 1] = {{0}};")
+        lines.append(f"char weaver_mv_{i}_s[((0 ? ({n}) : -1) < 0) + 1] = {{0}};")
+        lines += [
+            f"char weaver_mv_{i}_b{k}[(((unsigned long long)({n}) >> {8 * k}) & 0xff) + 1] = {{0}};" for k in range(8)
+        ]
+    return "\n".join(lines) + "\n"
+
+
+def macro_values(m: dict[str, Any], udir: Path, names: list[str], limit: int = 24) -> dict[str, bool]:
+    """Object-like macros spelled differently by the two compilers: which have the same value?
+
+    Each macro is used as an integer constant expression with both compilers; its size, signedness and
+    all eight bytes of its value must agree.  A macro that is not an integer constant expression (a
+    string, a float, a function-like macro, anything naming a variable) is absent from the result."""
+    names = names[:limit]
+    if not names:
+        return {}
+
+    def attempt(batch: list[str], stem: str) -> dict[str, bool] | None:
+        src = udir / f"{stem}.c"
+        src.write_text(_macro_source(m["file"], batch))
+        ps, ss, err = _build_both(m, udir, src, stem, "weaver_mv_")
+        if err:
+            return None
+        out = {}
+        for i, n in enumerate(batch):
+            keys = [f"weaver_mv_{i}_{s}" for s in ("z", "s", *(f"b{k}" for k in range(8)))]
+            out[n] = all(ps.get(k) is not None and ps.get(k) == ss.get(k) for k in keys)  # type: ignore[union-attr]
+        return out
+
+    together = attempt(names, "macros.probe")
+    if together is not None:
+        return together
+    res: dict[str, bool] = {}
+    for i, n in enumerate(names):  # one of them is not a constant: find the ones that are
+        one = attempt([n], f"macros.probe{i}")
+        if one is not None:
+            res.update(one)
+    return res
+
+
 def layout_probe(project: Project, profile: Profile, m: dict[str, Any], udir: Path) -> dict[str, Any]:
     tu = load_unit_ast(m, udir, str(project.root))
     if tu is None:
@@ -90,30 +162,9 @@ def layout_probe(project: Project, profile: Profile, m: dict[str, Any], udir: Pa
     qs, skipped = _questions(tu)
     src = udir / "layout.probe.c"
     src.write_text(_probe_source(m["file"], qs))
-    tr = m.get("translation") or {}
-    sec_tool = (m.get("secondary_tool") or {}).get("path")
-    if not sec_tool or not tr.get("options"):
-        return {"status": "unavailable", "reason": "no secondary frontend translation recorded"}
-    prod_cmd = [
-        m["sanitized"]["compiler"],
-        *m["sanitized"]["options"],
-        "-w",
-        "-c",
-        str(src),
-        "-o",
-        str(udir / "layout.prod.o"),
-    ]
-    sec_cmd = [sec_tool, *tr["options"], "-w", "-c", str(src), "-o", str(udir / "layout.sec.o")]
-    rp = run(prod_cmd, cwd=m["directory"], timeout=600)
-    rs = run(sec_cmd, cwd=m["directory"], timeout=600)
-    if not rp.ok:
-        return {"status": "unavailable", "reason": f"production compiler rejected the probe: {rp.stderr_text(800)}"}
-    if not rs.ok:
-        return {"status": "unavailable", "reason": f"secondary frontend rejected the probe: {rs.stderr_text(800)}"}
-    ps = symbol_sizes(udir / "layout.prod.o", "weaver_probe_")
-    ss = symbol_sizes(udir / "layout.sec.o", "weaver_probe_")
-    if ps is None or ss is None:
-        return {"status": "unavailable", "reason": "object format is not ELF; use a native layout report"}
+    ps, ss, err = _build_both(m, udir, src, "layout", "weaver_probe_")
+    if err or ps is None or ss is None:
+        return {"status": "unavailable", "reason": err}
     values, mismatches = [], []
     for i, (_expr, desc) in enumerate(qs):
         a, b = ps.get(f"weaver_probe_{i}"), ss.get(f"weaver_probe_{i}")

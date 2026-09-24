@@ -98,7 +98,13 @@ class Ledger:
         if not recipe.applicable(finding):
             raise WeaverError(f"recipe {recipe.id} does not apply to a {finding['kind']} finding")
         ctx = RecipeContext(self.project, inv)
-        result = recipe.evaluate(ctx, finding)
+        # with no recipe named, the first one that can apply the change (else the first that applies)
+        results = []
+        for r in candidates:
+            results.append((r, r.evaluate(ctx, finding)))
+            if results[-1][1].eligible:
+                break
+        recipe, result = next(((r, x) for r, x in results if x.eligible), results[0])
         cand = result.to_json()
         txn_id = "T-" + short_hash(finding["id"], recipe.id, cand["file_hashes"], time.time_ns(), length=8)
         txn: dict[str, Any] = {

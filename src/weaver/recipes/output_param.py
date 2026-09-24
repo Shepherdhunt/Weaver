@@ -363,6 +363,79 @@ def _semicolon(lx: Any, start: int) -> int | None:
     return None
 
 
+def _pre_c99(macros: dict[str, str]) -> bool:
+    if not macros:
+        return False  # not collected: nothing to go on
+    v = macros.get("__STDC_VERSION__", "").rstrip("lL")
+    return not v.isdigit() or int(v) < 199901
+
+
+def _mentions(n: Node | None, decl_id: str) -> bool:
+    return n is not None and any(
+        x.kind == "DeclRefExpr" and (x.raw.get("referencedDecl") or {}).get("id") == decl_id for x in n.walk()
+    )
+
+
+COMPARE = {"==", "!=", "<", ">", "<=", ">="}
+
+
+def _condition_of(top: Node, vid: str) -> Node | str | None:
+    """The if or switch statement whose condition evaluates the call before anything else can happen.
+
+    Between the call and the condition only parentheses, casts, '!' and comparisons whose other operand
+    has no side effects and does not read the output variable are allowed: then computing the result just
+    before the statement and testing its status in the condition is the same program.  Short-circuit and
+    conditional operators (the call might not run) and loop conditions (it runs every iteration) are not.
+    """
+    from weaver.analysis.functions import has_side_effects
+
+    n = top
+    while n.parent is not None:
+        p = n.parent
+        if p.kind in ("IfStmt", "SwitchStmt"):
+            return p if n.index == 0 else None
+        if p.kind in ("ParenExpr", "ImplicitCastExpr", "CStyleCastExpr") or (
+            p.kind == "UnaryOperator" and p.opcode == "!"
+        ):
+            n = p
+            continue
+        if p.kind == "BinaryOperator" and p.opcode in COMPARE and n.index in (0, 1):
+            other = p.child(1 - n.index)
+            if other is None or has_side_effects(other) or _mentions(other, vid):
+                return "the rest of the condition has side effects or reads the output variable"
+            n = p
+            continue
+        return None
+    return None
+
+
+def _hoisted(
+    ctx: RecipeContext, file: str, st: Node | None, call: tuple[Any, int, int], got: str, take: str, status: str
+) -> tuple[int, int, str] | str:
+    """Replace ``if (!f(&x)) ...`` by ``{ r = f(); x = r.value; if (!r.status) ... }``.
+
+    The block keeps the result's scope to the statement and is valid wherever a statement is (after a
+    label, as an unbraced body, after 'else', and in C89)."""
+    sp = st.file_span() if st is not None else None
+    if sp is None:
+        return "the if or switch statement is not plain source text"
+    text = ctx.lexed(file).text
+    start, end = sp[1], sp[2]
+    if text[end - 1] not in ";}":
+        end = _stmt_end(ctx, file, end)  # 'if (c) return 0;' ends before its ';'
+        if end is None:
+            return "the end of the if or switch statement could not be found"
+    if not (start <= call[1] and call[2] <= end):
+        return "the call is not inside the statement's text"
+    body = text[start : call[1]] + status + text[call[2] : end]
+    ls = text.rfind("\n", 0, start) + 1
+    lead = text[ls:start]
+    ind = lead[: len(lead) - len(lead.lstrip())]
+    if "\\\n" not in body:  # indent the statement one level (not across a line continuation)
+        body = body.replace("\n", "\n    ")
+    return start, end, f"{{\n{ind}    {got}\n{ind}    {take}\n{ind}    {body}\n{ind}}}"
+
+
 def _stmt_end(ctx: RecipeContext, file: str, end: int) -> int | None:
     """Offset just past the ';' that ends a statement whose expression ends at ``end``."""
     lx = ctx.lexed(file)
@@ -576,13 +649,23 @@ class OutputParamRecipe(Recipe):
                 pos("result", f"returns '{ret}'; {what} travel in {result_name} (needs value records)")
         else:
             pos("result", "returns nothing: the value becomes the return value")
-        flag_t, (no, yes) = "_Bool", ("0", "1")
+        # C89 has no _Bool, compound literals or designated initialisers: every unit that compiles an affected
+        # file says which C it is through its own __STDC_VERSION__
+        c89 = sorted({u["file"] for f in files for u in ctx.units_for_file(f) if _pre_c99(ctx.macros(u))})
+        flag_t, (no, yes) = ("int" if c89 else "_Bool"), ("0", "1")
         if tu is not None and unit is not None:
             macros = ctx.macros(unit)
             if "bool" in tu.typedefs or "bool" in macros:
                 flag_t = "bool"
                 if "true" in macros and "false" in macros:
                     no, yes = "false", "true"
+        make = f"{fname}_result" if c89 and record else None
+        if make:
+            if ctx.ident_occurrences(make, sorted(inv["files"])):
+                P["result"].fail(VIOLATED, f"the name {make} is already used")
+            taken = {n.name for n in tu.top if n.name} & {"status", "value", "has_value"} if tu is not None else set()
+            if taken:
+                P["result"].fail(VIOLATED, f"{def_file} declares {', '.join(sorted(taken))} at file scope")
 
         # -- complete callers (as scalar-input) --------------------------------------------------------
         ScalarInputRecipe()._check_callers(ctx, fname, fsum, decls, callers, P["callers"], pos)
@@ -631,20 +714,35 @@ class OutputParamRecipe(Recipe):
             f"/* {fname}(): {', '.join(carried[:-1]) + ' and ' if len(carried) > 1 else ''}{carried[-1]} */\n"
             "typedef struct\n{\n" + "".join(f"    {x}\n" for x in fields) + f"}} {result_name};\n\n"
         )
+        maker = ""
+        if make:
+            args = ([f"{ret} status"] if form == "status" else []) + [f"{tspell} value"]
+            args += [f"{flag_t} has_value"] if optional else []
+            maker = (
+                f"/* builds a {result_name} ({', '.join(c89)} compile{'s' if len(c89) == 1 else ''} as C89) */\n"
+                f"static {result_name} {make}({', '.join(args)})\n{{\n    {result_name} r;\n"
+                + "".join(f"    r.{a.split()[-1]} = {a.split()[-1]};\n" for a in args)
+                + "    return r;\n}\n\n"
+            )
         for i, (d, s0, e0, text) in enumerate(home):
             why = f"{fname}() returns {result_name}"
+            here = maker if d["file"] == def_file and d.get("definition") else ""
+            if here and i > 0:  # the constructor goes on the lines before the definition
+                src = ctx.lexed(d["file"]).text
+                ls = _above_comment(src, src.rfind("\n", 0, s0) + 1)
+                put(Edit(d["file"], ls, ls, "", here, f"{result_name} constructor (C89)"))
             if i == 0:
                 # the record goes on the lines before the first declaration in the header (else the source),
                 # in the same edit as that declaration's return type
                 src = ctx.lexed(d["file"]).text
                 ls = _above_comment(src, src.rfind("\n", 0, s0) + 1)
                 gap = "\n" if ls > 1 and src[src.rfind("\n", 0, ls - 1) + 1 : ls - 1].strip() else ""
-                record_text = gap + typedef + src[ls:s0] + result_name
+                record_text = gap + typedef + here + src[ls:s0] + result_name
                 put(Edit(d["file"], ls, e0, src[ls:e0], record_text, why + "; result record"))
             else:
                 put(Edit(d["file"], s0, e0, text, result_name, why))
         shape = {"form": form, "record": record, "optional": optional, "result": result_name, "flag_t": flag_t,
-                 "no": no, "yes": yes}  # fmt: skip
+                 "no": no, "yes": yes, "make": make, "c89": bool(c89)}  # fmt: skip
         if fn is not None and body is not None and tspell:
             self._body_edits(ctx, finding, body, params[idx].id if idx < len(params) else "", tspell, shape,
                              wa, writes, put)  # fmt: skip
@@ -654,6 +752,13 @@ class OutputParamRecipe(Recipe):
         for ck, c in callers:
             self._call_edits(ctx, ck, c, idx, fname, shape, P, put, tmp_used, tally, then)
         _merge_insertions(edits)
+        ordered = sorted(edits.values(), key=lambda e: (e.file, e.start, e.end))
+        for a, b in zip(ordered, ordered[1:]):
+            if a.file == b.file and b.start < a.end:
+                P["sites"].fail(
+                    VIOLATED,
+                    f"{a.file}: two rewrites overlap ({a.reason}; {b.reason}): convert one call at a time",
+                )
         if P["sites"].status == ESTABLISHED and P["private"].status == ESTABLISHED:
             pos("sites", f"{len(callers)} call site(s) rewritten")
             if tally.get("local"):
@@ -733,6 +838,13 @@ class OutputParamRecipe(Recipe):
     @staticmethod
     def _literal(shape: dict[str, Any], status: str | None, state: int | None, pname: str, flag: str) -> str:
         """The record a return gives back.  ``state`` None: a return a folded null test makes unreachable."""
+        if shape.get("make"):  # C89: through the constructor; an unwritten value is passed as 0
+            written = state == YES or state == MAYBE or (state is not None and not shape["optional"])
+            args = [f"({status})"] if status is not None else []
+            args.append(pname if written else "0")
+            if shape["optional"]:
+                args.append(shape["yes"] if state == YES else flag if state == MAYBE else shape["no"])
+            return f"{shape['make']}({', '.join(args)})"
         parts = [f".status = ({status})"] if status is not None else []
         if state == YES or (state is not None and not shape["optional"]):
             parts.append(f".value = {pname}")
@@ -1070,6 +1182,16 @@ class OutputParamRecipe(Recipe):
             )
         elif par is not None and par.kind == "ReturnStmt":
             kind = "return"
+        cond: Node | None = None
+        if kind == "other" and form == "status" and drop is None:
+            found = _condition_of(top, tgt["vid"])
+            if isinstance(found, str):
+                P["sites"].fail(VIOLATED, where + found)
+                return
+            if found is not None:
+                cond, kind = found, "cond"
+        elif kind == "other" and form == "status" and drop is not None:
+            kind = "expr"  # a discarded output: 'f(a).status' works wherever the call was
         if form == "void" and kind != "stmt" or kind == "other":
             P["sites"].fail(VIOLATED, f"{where}the call's value is used inside a larger expression")
             return
@@ -1108,6 +1230,13 @@ class OutputParamRecipe(Recipe):
             new = f"{var} = {new_call}" + (".value" if record else "")
             put(Edit(f, cs[1], cs[2], text[cs[1] : cs[2]], new, f"{where}{what}"))
             return
+        if kind == "cond":
+            new = _hoisted(ctx, f, cond, cs, f"{result_name} {tmp} = {new_call};", take(tmp), f"{tmp}.status")
+            if isinstance(new, str):
+                P["source"].fail(VIOLATED, where + new)
+                return
+            put(Edit(f, new[0], new[1], text[new[0] : new[1]], new[2], f"{where}{what}, then test the status"))
+            return
         if kind == "stmt":
             ss, end = cs, _stmt_end(ctx, f, cs[2])
         else:
@@ -1144,6 +1273,14 @@ class OutputParamRecipe(Recipe):
                 return
             new = f"{{{inner}{got}{inner}{text[ls[1] : ls[2]]} = {tmp}.status;{inner}{take(tmp)}{nl}}}"
         elif kind == "decl":
+            block = stmt.parent
+            later = [x for x in block.real_children() if x.index > stmt.index] if block is not None else []
+            if shape.get("c89") and any(x.kind == "DeclStmt" for x in later):
+                P["sites"].fail(
+                    VIOLATED,
+                    f"{where}C89: receiving the value is a statement, and declarations follow it in the block",
+                )
+                return
             new = f"{got}{nl}{text[ss[1] : cs[1]]}{tmp}.status{text[cs[2] : end - 1]};{nl}{take(tmp)}"
         else:
             new = f"{{{inner}{got}{inner}{take(tmp)}{inner}return {tmp}.status;{nl}}}"

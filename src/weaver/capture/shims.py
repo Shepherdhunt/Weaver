@@ -117,6 +117,9 @@ def finalize(log: Path, out_dir: Path, exclude: list[str] | None = None, root: s
             entry: dict[str, Any] = {"directory": rec["cwd"], "file": src, "arguments": args}
             if pa.output and pa.action in ("-c", "-S") and len(pa.sources) == 1:
                 entry["output"] = pa.output
+            elif not pa.output and pa.action in ("-c", "-S"):
+                # 'cc -c dir/foo.c' writes foo.o in the working directory; links name that file
+                entry["output"] = os.path.splitext(os.path.basename(src))[0] + (".o" if pa.action == "-c" else ".s")
             compdb.append(entry)
         if pa.asm_sources:
             other.append({"kind": "assembly", "cwd": rec["cwd"], "argv": rec["argv"], "inputs": pa.asm_sources})
