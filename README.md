@@ -51,6 +51,13 @@ can be accepted. The optional LLM explains and recommends; it never edits or val
 | **Change impact** | Snapshots of pointer facts (the working tree, or any git revision). `weaver impact` explains each pointer whose behavior changed since a snapshot, which edited line caused it, which recipe verdicts flipped, which pinned or transaction-implied contracts broke, and optionally whether builds and differential runs still agree. `weaver check` exits 1 on high risk, for CI. |
 | **CI ratchet** | `weaver ratchet` compares the analysis with a committed baseline (`weaver-ratchet.json`) and fails when a file gains pointers, high-risk pointers or violations of the chosen simplification profile, naming each new pointer. `--base origin/main` compares only the files a merge request changed; `--format github` annotates the pull request; `--update` locks in progress (or records a deliberate increase for review). Counts decide, so renames never fail it. Guide: [`docs/ci.md`](docs/ci.md). |
 | **Container image** | `Dockerfile`: Ubuntu 24.04 with Clang 18 (and its profile runtime), LLVM 18, GCC 13, binutils, Make, CMake, Ninja, Meson and git. SVF is a separate target (`--target svf`), and the `test` target runs the test suite in the image. `container/weaver-docker` runs it on the current project: mounted at the same path, run as the host user, the web interface published on the host's loopback only. Behind a TLS-inspecting proxy the build takes its CA as a secret. Guide: [`docs/container.md`](docs/container.md). |
+| **`weaver init`** | Reads the project instead of writing a template:
+  - the build system: CMake (preferred over a Makefile when it builds the tests), Meson, Autotools or Make;
+  - the compiler, named as the build calls it, so a Makefile's `CC = gcc -std=c89` is captured with its flags;
+  - CMake options: the ones about tests are turned on, the others are listed;
+  - the tests the project registers.
+
+  It writes a profile whose capture and validation build use one configuration, with no placeholder facts. In a terminal it asks about each choice; `--yes` and flags make it scriptable. The web setup form uses the same detection. Verified on cJSON (both CMake and Makefile) and on a Meson project in the container. |
 | **Setup check and onboarding** | `weaver doctor` (and **Check setup** in the interface) checks this machine and the project before a run. It compiles a few lines with each compiler: JSON AST, LTO, a coverage build. It also checks SVF, binutils, build tools, memory, disk and the clock, and the project's configuration: compile commands, the compilers they name, the AST reader of GCC profiles, validation, acceptance requirements that nothing configures, placeholders, shared objects with no program, concurrency, the AI key, and the analysis. Every problem comes with a fix for the platform (`apt`, `dnf` or `brew`). The step-by-step guide for a new repository is [`docs/onboarding.md`](docs/onboarding.md). |
 | **Web interface** | `weaver serve`: load or set up a project, compile, then explore a map of every pointer colored by what it does to its target. Graphs show points-to and call relationships, and a source view has inline marks. Refactors can be proposed, validated and accepted, contracts pinned, and change impact compared. `--scope` shows one subsystem of a large project. `weaver export-ui` records the interface as one read-only HTML page for sharing. |
 | **AI explanations** (tracker §10) | Off by default; switched on per project. Bring your own key: Claude through Anthropic's SDK, or any OpenAI-style Chat Completions server, hosted or local. One explanation guide (Weaver's vocabulary, evidence rules, eight fixed answer sections) is given to every provider, with the same focused evidence slice and read-only evidence tools; answers are checked against it. `weaver ai`, `weaver explain`. |
@@ -188,7 +195,7 @@ New to a repository? Follow [`docs/onboarding.md`](docs/onboarding.md). The comm
 ```sh
 weaver doctor                                 # what this machine and project lack, and how to fix it
 weaver doctor --build                         # also: does the validation build compile what was analysed?
-weaver init                                   # write weaver.yaml; record profiles, target and platform facts
+weaver init                                   # write weaver.yaml from the project's build, compiler and tests
 weaver capture shim --tool gcc=/usr/bin/gcc   # a recording shim named like the compiler the build calls
 make clean && PATH=$PWD/.weaver/capture/shims:$PATH make   # the build's own flags are recorded
 weaver capture finalize --out build           # -> build/compile_commands.json, links.json, tools.json
@@ -373,6 +380,10 @@ The end-to-end tests capture real builds of the fixture with Clang and GCC. They
 - your own change and AI drafts: diffs placed by content, blocked proposals that say why, a change
   that keeps its pointer or breaks a contract, one accepted and reverted with identical output; a
   draft that does not apply, is retried once and validates; a model that declines to patch;
+- `weaver init`: CMake chosen when it builds the tests (options for tests turned on, others
+  listed), a Makefile's compiler name recorded, a build it cannot read asking for the command,
+  each interactive answer applied, a CMake project captured with its tests and validated with the
+  same build, and the web setup form's detection;
 - the build configuration: which flags count (defines, dialect, includes, target; not warnings or
   optimisation), sources on one side only, generated sources and build-system probes ignored,
   the record in a real validation, the policy that requires it, the same build found equal, and a

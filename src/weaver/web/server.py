@@ -310,6 +310,18 @@ def route(app: App, method: str, path: str, q: dict[str, str], body: dict[str, A
         )
         app.open(str(cfg))
         return {"ok": True, "config": str(cfg)}
+    if (method, head) == ("GET", "detect-setup"):
+        from pathlib import Path
+
+        from weaver import scaffold
+
+        root = Path(q.get("path", "")).expanduser()
+        if not root.is_dir():
+            raise FileNotFoundError(f"{root} is not a directory")
+        try:
+            return scaffold.plan(root.resolve(), cc=q.get("cc") or None).to_json()
+        except ValueError as e:
+            return {"system": None, "why": str(e)}
     if (method, head) == ("GET", "detect-tests"):
         from pathlib import Path
 

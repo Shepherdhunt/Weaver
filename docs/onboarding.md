@@ -108,18 +108,41 @@ can see.
 
 ## 2. Write `weaver.yaml`
 
-There are three ways:
+Let `weaver init` read it from the project:
 
-- **The web interface.** Run `weaver serve` and open the sign-in link it prints. The setup form
-  asks for:
-  - the build command and the compiler;
-  - the tests (it detects them);
-  - a program run to compare;
-  - the concurrency model.
-- **`weaver init`.** It writes a commented template. Edit the profile, and replace or delete the
-  `recorded_…` placeholders under `target` and `platform`. Doctor reports placeholders that are
-  left.
-- **By hand**, starting from the examples below.
+```sh
+weaver init            # in a terminal: shows what it found and asks about each choice
+weaver init --yes      # takes what it found; --print shows the file without writing it
+```
+
+It detects:
+- **the build system:** CMake, Meson, Autotools or Make.
+  - When a project has both CMake and a Makefile, it takes CMake if CMake builds the tests.
+- **the compiler, named as the build calls it:** `--cc`, else `$CC`, else the one a Makefile sets
+  in `CC`, else `cc`. The capture shim takes that name, so the build's own flags are recorded.
+- **CMake options:**
+  - the ones about tests are turned on;
+  - the others that are off are listed in the file, and `weaver init` asks about them.
+- **the tests the project registers:** CTest, `meson test`, `make check`/`test`, or test scripts.
+
+It writes one profile:
+- the capture is a clean build in `.weaver/build/capture`;
+- the validation build is the same configuration in each workspace;
+- the tests run against that validation build.
+
+It records the compiler's target triple; there are no placeholders to fill in. For cJSON it
+picks the CMake build with its tests. It lists `ENABLE_CJSON_UTILS` as off, which
+`weaver init --enable ENABLE_CJSON_UTILS` turns on.
+
+The flags, for scripts and CI:
+- `--system`, `--build` (any other build), `--clean`, `--cc`;
+- `--enable OPTION`;
+- `--test CMD`, `--no-tests`, `--compare CMD`;
+- `--concurrency single-threaded`, `--secondary CLANG`;
+- `--force`.
+
+The web interface's setup form does the same detection (**Detect**, or when you enter the project
+directory). You can also write the file by hand, starting from the examples below.
 
 ### How capture works
 

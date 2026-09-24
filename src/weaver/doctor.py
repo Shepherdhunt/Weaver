@@ -539,17 +539,27 @@ def project_checks(project: Any, coverage: dict[str, str] | None = None) -> list
                         buildcheck.describe(res) + when + stale,
                         ""
                         if status == OK
+                        else "fix validation.build in weaver.yaml (it runs in a copy of the project), then: "
+                        "weaver doctor --build"
+                        if res.get("build_failed") is not None
                         else "make the validation build and the capture the same "
                         "configuration (docs/onboarding.md, step 1), then: weaver doctor --build",
                     )
                 )
-                # fmt: skip
         placeholders = [f"{k}={val}" for k, val in {**prof.target, **prof.platform}.items()
                         if isinstance(val, str) and val.startswith("recorded_")]  # fmt: skip
         if placeholders:
-            out.append(Check(ps, "target facts", INFO,
-                             f"placeholders from 'weaver init' ({', '.join(placeholders[:3])}): candidate cards "
-                             "show them as the target"))  # fmt: skip
+            out.append(
+                Check(
+                    ps,
+                    "target facts",
+                    INFO,
+                    f"placeholders from an older 'weaver init' ({', '.join(placeholders[:3])}): candidate "
+                    "cards show them as the target",
+                    "replace them with real facts, or delete them",
+                )
+            )
+            # fmt: skip
         links = prof.compile_commands.parent / "links.json"
         if links.exists() and not project.programs:
             try:

@@ -3,7 +3,7 @@
 This is an assessment of Weaver as a product, as of September 2026. It rests on three kinds of
 evidence:
 
-- **The test suite.** 151 tests, passing on the host (Python 3.11) and inside the container image (Python 3.12). The end-to-end tests capture and build real fixtures with GCC and
+- **The test suite.** 157 tests, passing on the host (Python 3.11) and inside the container image (Python 3.12). The end-to-end tests capture and build real fixtures with GCC and
   Clang.
 - **The cFS pilot.** cFE, OSAL, PSP and the sample app, with 3,343 pointer findings in the analysed
   build ([`pilots/cfs`](../pilots/cfs/README.md)).
@@ -151,8 +151,13 @@ Found but not fixed:
      - the 24 test and fuzzer sources;
      - `ENABLE_LOCALES` and the export defines that only the CMake validation build uses.
    - On the CMake capture, all 27 sources are compiled as analysed.
-5. **A better `weaver init`**: ask for the build and test commands (`weaver tests` already detects
-   them), and leave out placeholder facts.
+5. ~~**A better `weaver init`.**~~ Done. It reads the build system, the compiler (named as the
+   build calls it), CMake options and the tests from the project. It writes one profile whose
+   capture and validation build share a configuration, with no placeholders. In a terminal it
+   asks about each choice, and the web setup form uses the same detection. Verified on:
+   - cJSON's CMake build: 810 pointers, and the build configuration matches;
+   - cJSON's Makefile build: 470 pointers, and the build configuration matches;
+   - a Meson project in the container, validated with `meson test` and coverage.
 6. **Two more first runs by someone other than the author**: bare-metal firmware with a cross
    compiler, and a CMake and Ninja application.
 

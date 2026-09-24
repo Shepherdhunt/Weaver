@@ -42,15 +42,48 @@ def _print_json(obj: Any) -> None:
 
 # ---------------------------------------------------------------------------
 def cmd_init(args: argparse.Namespace) -> int:
-    from weaver.config import CONFIG_NAME, TEMPLATE
+    from weaver import scaffold
+    from weaver.config import CONFIG_NAME
 
     target = Path(args.config or ".").resolve()
     if target.is_dir():
         target = target / CONFIG_NAME
-    if target.exists() and not args.force:
+    if target.exists() and not args.force and not args.print:
         raise WeaverError(f"{target} exists (use --force to overwrite)")
-    target.write_text(TEMPLATE.format(name=target.parent.name))
-    print(f"wrote {target}; record the profile's compile database, target and platform facts before collecting")
+    root = target.parent
+    try:
+        tests = args.test if (args.test or args.no_tests) else None
+        p = scaffold.plan(root, system=args.system, cc=args.cc, build=args.build, tests=tests, enable=args.enable)
+    except ValueError as e:
+        raise WeaverError(str(e)) from None
+    extra: dict[str, Any] = {"compare": args.compare, "concurrency": args.concurrency}
+    say = print if not args.print else (lambda *a, **k: print(*a, **k, file=sys.stderr))
+    if not args.yes and not args.print and sys.stdin.isatty() and sys.stdout.isatty():
+        say("\n".join(["Weaver found:", *scaffold.summary(p), "Press Enter to keep a value, or type another.", ""]))
+        p, answers = scaffold.interactive(p, root, lambda q, _d: input(q))
+        extra = {k: extra.get(k) or v for k, v in answers.items()}
+    if args.clean:
+        p.clean = args.clean
+    text = scaffold.render(p, root.name, compare=extra.get("compare"), concurrency=extra.get("concurrency"),
+                           secondary=args.secondary)  # fmt: skip
+    if args.print:
+        sys.stdout.write(text)
+        return 0
+    target.write_text(text)
+    say(
+        "\n".join(
+            [
+                f"wrote {target}",
+                *scaffold.summary(p),
+                "",
+                "next:",
+                "  weaver doctor                  # is this machine ready, and is the configuration complete?",
+                "  weaver refresh --capture       # build through the shims and analyse",
+                "  weaver doctor --build          # does the validation build compile what was analysed?",
+            ]
+        )
+    )
+    # fmt: skip
     return 0
 
 
@@ -978,8 +1011,21 @@ def build_parser() -> argparse.ArgumentParser:
         sp.set_defaults(func=fn)
         return sp
 
-    sp = add("init", cmd_init, "write a weaver.yaml template")
-    sp.add_argument("--force", action="store_true")
+    sp = add("init", cmd_init, "write a weaver.yaml for this project: its build, compiler and tests, detected")
+    sp.add_argument("--force", action="store_true", help="overwrite an existing weaver.yaml")
+    sp.add_argument("--yes", "-y", action="store_true", help="take what was detected without asking")
+    sp.add_argument("--print", action="store_true", help="print the weaver.yaml instead of writing it")
+    sp.add_argument("--system", choices=["cmake", "meson", "autotools", "make"], help="the build system to use")
+    sp.add_argument("--build", help="the build command to capture (for any other build; {cc} is the compiler shim)")
+    sp.add_argument("--clean", help="the command that removes the build's outputs, run before each capture")
+    sp.add_argument("--cc", help="the compiler, named as the build calls it (default: $CC, the Makefile's, or cc)")
+    sp.add_argument("--enable", action="append", default=[], metavar="OPTION",
+                    help="a CMake option to turn on in the capture and validation builds (repeatable)")  # fmt: skip
+    sp.add_argument("--test", action="append", default=[], metavar="CMD", help="a test command (repeatable)")
+    sp.add_argument("--no-tests", action="store_true", help="configure no tests")
+    sp.add_argument("--compare", metavar="CMD", help="a program run whose exit status and output must not change")
+    sp.add_argument("--concurrency", choices=["single-threaded"], help="declare the program single-threaded")
+    sp.add_argument("--secondary", metavar="CLANG", help="the Clang that reads the AST of non-Clang builds")
 
     sp = add("capture", cmd_capture, "build capture: generate compiler shims or finalize a capture log")
     sp.add_argument("action", choices=["shim", "finalize"])

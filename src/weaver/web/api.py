@@ -8,12 +8,8 @@ files the CLI uses.
 from __future__ import annotations
 
 import os
-import re
-import shlex
 from pathlib import Path
 from typing import Any
-
-import yaml
 
 from weaver.analysis.inventory import load_inventory
 from weaver.analysis.uses import describe_use_parts
@@ -569,20 +565,6 @@ def source_view(project: Project, rel: str, cache: Cache) -> dict[str, Any]:
     }
 
 
-def _test_name(cmd: str) -> str:
-    try:
-        words = shlex.split(cmd)
-    except ValueError:
-        words = cmd.split()
-    if not words:
-        return "test"
-    if words[0] in ("make", "sh", "bash", "ninja", "meson") and len(words) > 1:
-        base = f"{words[0]}-{Path(words[1]).name}"
-    else:
-        base = Path(words[0]).name
-    return re.sub(r"[^A-Za-z0-9_.-]+", "-", base).strip("-.")[:40] or "test"
-
-
 def setup_project(
     path: str,
     build: str,
@@ -604,50 +586,26 @@ def setup_project(
     characterises the program), the two trees' outputs must also be identical.
     Without either, validation is compile-only, which the interface flags.
     """
+    from weaver import scaffold
+
     root = Path(path).expanduser().resolve()
     if not root.is_dir():
         raise FileNotFoundError(f"{root} is not a directory")
     cfg_path = root / CONFIG_NAME
     if cfg_path.exists():
         raise FileExistsError(f"{cfg_path} already exists")
-    # also under the compiler's own name: a Makefile that runs 'gcc' itself finds the shim first on PATH
-    base = os.path.basename(compiler)
-    tools = {"cc": compiler, **({base: compiler} if base not in ("", "cc") else {})}
-    profile: dict[str, Any] = {
-        "id": "default",
-        "description": f"captured build: {build}",
-        "compile_commands": ".weaver/compdb/default/compile_commands.json",
-        "capture": {"command": build, "tools": tools},
-        "target": {"architecture": "recorded_architecture"},
-        "platform": {"runtime_mode": "recorded_runtime_mode"},
-    }
+    try:
+        detected = scaffold.plan(root, cc=compiler or None)
+    except ValueError:
+        detected = None
+    if detected is not None and detected.capture == build.strip():
+        plan = detected  # the detected build, unchanged: keep its validation build and build directories
+        if tests is not None:
+            plan.tests = scaffold.plan(root, cc=compiler or None, build=build, tests=tests).tests
+    else:
+        plan = scaffold.plan(root, cc=compiler or None, build=build, tests=tests)
     if clean:
-        profile["capture"]["clean"] = clean
-    if secondary:
-        profile["secondary_frontend"] = {"compiler": secondary}
-    require = ["compile", "mechanical-recheck"]
-    if run or tests:
-        val: dict[str, Any] = {"build": {"run": build.replace("{cc}", compiler), "cwd": "{workspace}"}}
-        if tests:
-            names: list[str] = []
-            for t in tests:
-                n = _test_name(t)
-                names.append(n if n not in names else f"{n}-{len(names)}")
-            val["tests"] = [{"name": n, "run": t, "cwd": "{workspace}"} for n, t in zip(names, tests)]
-            require.append("testing")
-        if run:
-            val["compare"] = [{"name": "run", "run": run, "cwd": "{workspace}"}]
-            require.append("differential-testing")
-        profile["validation"] = val
-    cfg = {
-        "schema": "weaver.project/1",
-        "project": {"name": name or root.name, "root": ".", "workspace_exclude": [".git"]},
-        "preservation": {
-            "behaviors": ["outputs", "persistent-state", "side-effect-ordering"],
-            **({"concurrency": concurrency} if concurrency else {}),
-        },
-        "acceptance": {"require": require},
-        "profiles": [profile],
-    }
-    cfg_path.write_text(yaml.safe_dump(cfg, sort_keys=False))
+        plan.clean = clean
+    text = scaffold.render(plan, name or root.name, compare=run, concurrency=concurrency, secondary=secondary)
+    cfg_path.write_text(text)
     return cfg_path

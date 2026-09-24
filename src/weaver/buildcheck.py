@@ -103,7 +103,12 @@ def read_log(logdir: Path) -> list[tuple[str, list[str]]]:
 
 
 def _excluded(rel: str, project: Project) -> bool:
-    return any(part in set(project.workspace_exclude) for part in Path(rel).parts)
+    """Never copied into a validation workspace: an excluded name, or Weaver's state dir (where
+    'weaver init' puts the capture build)."""
+    if any(part in set(project.workspace_exclude) for part in Path(rel).parts):
+        return True
+    state = os.path.relpath(project.state_dir.resolve(), project.root.resolve())
+    return not state.startswith("..") and (rel == state or rel.startswith(state + os.sep))
 
 
 def _norm_path(value: str, directory: str, roots: list[tuple[str, str]], project: Project) -> str | None:

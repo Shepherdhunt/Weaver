@@ -235,7 +235,10 @@ function renderWelcome(keepProject) {
     h("p", { class: "hint" }, "First time on this machine? ",
       h("a", { href: "#", onclick: (e) => { e.preventDefault(); openDoctor(); } }, "Check that it has what Weaver needs"),
       " (compilers, points-to, coverage)."),
-    f("setup-path", "Project directory", { placeholder: "/path/to/c/project" }),
+    h("div", { class: "field" }, h("label", { for: "setup-path", text: "Project directory" }),
+      h("div", { class: "row" }, h("input", { id: "setup-path", placeholder: "/path/to/c/project", onchange: () => detectSetup() }),
+        h("button", { class: "btn small", onclick: () => detectSetup() }, "Detect")),
+      h("div", { id: "setup-detected", class: "hint", text: "Weaver reads the build system, compiler and tests from the directory." })),
     f("setup-build", "Build command", { value: "make -B CC={cc}" },
       "{cc} is replaced by a recording shim around the compiler. Shims named like the compiler also come first on PATH, " +
       "so a plain \"make -B\" works and keeps flags the Makefile puts in CC. Use a full rebuild so every file is seen, " +
@@ -282,13 +285,30 @@ function renderWelcome(keepProject) {
   ));
 }
 
-async function detectSetupTests() {
-  const v = (id) => document.getElementById(id).value.trim();
+// Fill the setup form from what the project says about its build (the same detection as 'weaver init').
+let detectSeq = 0;
+async function detectSetup() {
+  const path = document.getElementById("setup-path").value.trim();
+  if (!path) return;
+  const seq = ++detectSeq;  // typing then pressing Detect asks twice: only the last answer counts
+  let p;
+  try { p = await api(`detect-setup?path=${encodeURIComponent(path)}`); }
+  catch (e) { if (seq === detectSeq) clear(document.getElementById("setup-detected")).append(h("span", { text: e.message })); return; }
+  if (seq !== detectSeq) return;
+  const note = clear(document.getElementById("setup-detected"));
+  if (!p.system) { note.append(h("span", { text: p.why })); return; }
+  document.getElementById("setup-build").value = p.capture;
+  document.getElementById("setup-cc").value = p.compiler;
+  document.getElementById("setup-clean").value = p.clean || "";
+  note.append(h("div", { text: `Detected a ${p.system} build: ${p.why}. ` + p.notes.map((n) => n[0].toUpperCase() + n.slice(1)).join(". ") + "." }));
+  if (p.options_off && p.options_off.length)
+    note.append(h("div", { text: "CMake options that are off (turn on the ones whose code you want analysed with -DNAME=ON, in the build command): " +
+      p.options_off.map((o) => o.name).join(", ") }));
+  renderTestChoices(p.tests);
+}
+
+function renderTestChoices(found) {
   const box = clear(document.getElementById("setup-tests"));
-  let found;
-  try {
-    found = await api(`detect-tests?path=${encodeURIComponent(v("setup-path"))}&build=${encodeURIComponent(v("setup-build"))}&cc=${encodeURIComponent(v("setup-cc"))}`);
-  } catch (e) { box.append(h("span", { text: e.message })); return; }
   if (!found.length) box.append(h("div", { text: "No test entry point found (Makefile test/check target, CTest, Meson, test script). Add one below if the project has tests." }));
   for (const t of found) {
     box.append(h("label", { class: "check", title: t.why },
@@ -296,6 +316,16 @@ async function detectSetupTests() {
       h("span", { class: "d-sub", text: ` — ${t.why}${t.per_test ? " (compared test by test)" : ""}` })));
   }
   box.append(h("input", { id: "setup-test-extra", placeholder: "another test command (optional)" }));
+}
+
+async function detectSetupTests() {
+  const v = (id) => document.getElementById(id).value.trim();
+  const box = clear(document.getElementById("setup-tests"));
+  let found;
+  try {
+    found = await api(`detect-tests?path=${encodeURIComponent(v("setup-path"))}&build=${encodeURIComponent(v("setup-build"))}&cc=${encodeURIComponent(v("setup-cc"))}`);
+  } catch (e) { box.append(h("span", { text: e.message })); return; }
+  renderTestChoices(found);
 }
 
 // ---------------------------------------------------------------- settings

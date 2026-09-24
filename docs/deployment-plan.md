@@ -251,6 +251,14 @@ Done:
   passes the whole test suite and runs cJSON end to end through `container/weaver-docker`. Every
   validation now says whether its build compiles what was analysed, and `weaver doctor --build`
   checks it on demand.
+- A better `weaver init` (and the same detection in the web setup form). It reads:
+  - the build system;
+  - the compiler, named as the build calls it;
+  - CMake options, turning on the ones about tests;
+  - the tests.
+
+  It writes a profile whose capture and validation build share a configuration, with no
+  placeholders.
 
 Next:
 
@@ -258,10 +266,10 @@ Next:
    - `weaver doctor`;
    - the onboarding guide;
    - the container image;
-   - the build-configuration check.
+   - the build-configuration check;
+   - a better `weaver init`.
 
    Still to do:
-   - a better `weaver init`;
    - two more first runs by someone other than the author.
 
    Then several projects per server.
