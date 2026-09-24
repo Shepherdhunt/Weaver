@@ -211,6 +211,20 @@ share the same expansion location. Active code is compared per conditional segme
 between conditional directives), because activity can only change at a directive. This also makes
 the comparison independent of how each compiler lays out expanded macros in `-E` output.
 
+**Macros are compared by value when their text differs.** GCC's `limits.h` writes `INT_MIN` as
+`(-INT_MAX - 1)` and Clang's as `(-__INT_MAX__ -1)`. Compared as text, every unit that includes it
+would be `secondary-partial`, and whole-program preconditions would block every candidate in the
+program. Each object-like macro that project code can see and that the two compilers spell
+differently is used as an integer constant expression in a probe compiled by both. Its size, its
+signedness and all eight bytes of its value become array sizes, read back from the ELF symbols as the
+layout probes are. Equal answers move the macro to `same_value`. A macro that is not an integer
+constant (a string, a float, anything naming a variable) stays a difference.
+
+**Generated code follows the unit's C dialect.** A unit whose production macros have no
+`__STDC_VERSION__` of 199901 or later is C89. There, `output-param` uses an `int` flag and a static
+constructor next to the definition instead of `_Bool`, compound literals and designated
+initialisers, and refuses a call site whose new statement would precede a declaration.
+
 **Impact compares facts, not text.** Findings are matched by stable ID. A new use is judged against
 the old access class: a write through a formerly read-only pointer, or a new escape, is high
 severity. Changes are tied to edited hunks. Contracts come from two sources: pinned expectations

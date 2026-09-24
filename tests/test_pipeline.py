@@ -326,3 +326,13 @@ def test_gcc_profiles_read_the_ast_with_clang_unless_turned_off(tmp_path, capsys
     out = capsys.readouterr().out
     assert "WARNING:" in out and "have no AST evidence" in out and "secondary_frontend" in out
     assert not load_inventory(load_project(root))["findings"]
+
+
+@needs_gcc
+def test_probes_ignore_the_projects_warning_flags(tmp_path):
+    # the probe fixture is not written to the project's warnings; with -Werror they used to fail every probe
+    strict = "-O2 -std=c11 -Wall -Werror -Wmissing-prototypes -Wstrict-prototypes"
+    root = build_project(tmp_path, [{"id": "gcc", "cc": "gcc", "cflags": strict}])
+    caps = cli_json(root, "probe")["capabilities"]
+    for name in ("gcc_passes", "gcc_dumps", "stack_usage", "assembly", "callgraph_info"):
+        assert caps[name]["status"] == "probe-passed", (name, caps[name])

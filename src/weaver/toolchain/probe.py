@@ -64,7 +64,8 @@ DOCUMENTED: dict[str, dict[str, str]] = {
 def _probe_one(name: str, compiler: str, options: list[str], cwd: str, out: Path, stem: str) -> dict[str, Any]:
     recipe = RECIPES[name]
     src = out / "probe.c"
-    inv = recipe.build(compiler, options, str(src), out, stem)
+    # -w: the fixture is not written to the project's warning flags, and -Werror would fail the probe
+    inv = recipe.build(compiler, [*options, "-w"], str(src), out, stem)
     res = run(inv.argv, cwd=cwd, stdout_path=inv.stdout_to, timeout=600)
     stderr = res.stderr.decode(errors="replace")
     outputs = list(inv.outputs)

@@ -23,10 +23,10 @@ can be accepted. The optional LLM explains and recommends; it never edits or val
 
 | Plan item | What exists |
 |---|---|
-| Build capture (artifact plan §3) | Compiler wrapper and shims that preserve the exit status. The capture log is turned into `compile_commands.json`, `links.json` and `tools.json`. Response files are expanded and hashed. Tool identity comes from path, SHA-256, `--version` and predefined macros. A profile can name its build command so `weaver refresh --capture` (and the web interface) rebuild through the shims. |
+| Build capture (artifact plan §3) | Compiler wrapper and shims that preserve the exit status. The capture log is turned into `compile_commands.json`, `links.json` and `tools.json`. Response files are expanded and hashed. Tool identity comes from path, SHA-256, `--version` and predefined macros. A profile can name its build command so `weaver refresh --capture` (and the web interface) rebuild through the shims. The shims also go first on `PATH` under the tools' own names, so a Makefile's `CC = gcc -std=c89` is recorded with its flags. `cc -c foo.c` without `-o` is recorded as producing `foo.o`, so links map to their sources. |
 | Collection recipes (§§4-5) | Clang: `-E`, `-dM`, `-M`, JSON AST, LLVM IR (optimized and frontend-only), bitcode, record layouts. GCC: `-E`, `-dM`, `-M`, `-fdump-passes`, GENERIC/GIMPLE/SSA/alias/cgraph/RTL dumps, `-fstack-usage`, assembly, `-fcallgraph-info`. Each removed or added option is recorded. |
 | Capability matrix (§2) | `weaver probe` runs every recipe on a fixture and validates the resulting artifact. Each capability is reported as `documented`, `probe-passed`, `unverified` or `unavailable-in-this-profile`. |
-| Secondary frontend (§§6, 9) | Explicit GCC→Clang option translation. The target triple, dialect, system include list, implicit pre-includes and feature macros all come from the production compiler. Fidelity checks compare observable macros, the included header set, which conditional groups each compiler compiled, and ELF layout probes. Secondary-only *forwarding wrappers* (glibc's fortified `printf` under Clang) are recognized precisely rather than counted as differences. Each unit is labelled `native`, `secondary-checked`, `secondary-partial`, `secondary-unchecked` or `unsupported`. |
+| Secondary frontend (§§6, 9) | Explicit GCC→Clang option translation. The target triple, dialect, system include list, implicit pre-includes and feature macros all come from the production compiler. Fidelity checks compare observable macros, the included header set, which conditional groups each compiler compiled, and ELF layout probes. Secondary-only *forwarding wrappers* (glibc's fortified `printf` under Clang) are recognized precisely rather than counted as differences. Macros the two compilers spell differently (GCC's `INT_MIN` is `(-INT_MAX - 1)`, Clang's `(-__INT_MAX__ -1)`) are compiled with both and compared by value. Each unit is labelled `native`, `secondary-checked`, `secondary-partial`, `secondary-unchecked` or `unsupported`. A GCC profile uses the `clang` on `PATH` unless it names another or says `secondary_frontend: false`; `weaver refresh` warns when units end up without AST evidence. |
 | Pointer inventory (tracker §3) | Pointer variables, parameters, fields, returns and typedef-hidden pointers, each with a stable ID. Every use is classified (dereference read/write, copy, call argument, return, comparison, cast, arithmetic, capture…). Per-function summaries record calls with argument designators, writes by name and through pointers, address-taken functions and declarations. Unresolved facts stay `unknown`. |
 | Configuration coverage (tracker §2) | Code lines that no analysed configuration compiled, and project files no unit compiled or included. Both are reported as unexamined, never as pointer-free. |
 | **Link model and programs** | Images (executables, shared objects), the archive members a link really loads (from a traced replay), `-l` libraries, and dynamic exports and imports. Programs group the images that run together: declared in `weaver.yaml` with their entry points (closed), or one per image. "Who else can call this function?" is answered per program. |
@@ -37,7 +37,7 @@ can be accepted. The optional LLM explains and recommends; it never edits or val
 | **Task ownership** | For multi-task programs, `preservation.concurrency` declares the tasks, interrupt contexts, dispatchers and unresolved indirect-call targets. Weaver checks the declaration against every thread start and entry point, summarises each context's writes, and exempts stack objects whose address never escapes their task. `SI.no-concurrent-writers` then names the task and line of a possible concurrent write, or establishes that none exists. `weaver tasks` shows the contexts, what was checked and which contexts may write each global. |
 | Recipe `local-alias` (tracker §§4-5) | Replaces a local alias of one known object with direct access to that object. 13 preconditions. |
 | **Recipe `scalar-input`** (tracker §5) | Turns a read-only pointer-to-scalar parameter into a value parameter, and rewrites every declaration, dereference and call site (`&x` → `x`, `p` → `*p`). 10 preconditions, including SVF-backed may-modify, a complete caller set, sequencing at each call site, and no concurrent writer (single-threaded, or decided by the task model). |
-| **Recipe `output-param`** (tracker roadmap) | Turns a pointer parameter the function only writes into a return value. A `void` function returns the value (`get(a, &v);` → `v = get(a);`); a function that returns a status returns a small result record declared next to its prototype (`s = read(&v);` → the record's `status` and `value`). When the value is written on some paths only (an early error return), the record also carries `has_value`, and the caller assigns the value only when it was written. Each call must pass the address of a local variable (or a field of one) whose address is taken nowhere else, or pass on the caller's own pointer parameter from callers that do: converting the callee first then makes the caller a candidate (leaf-first; `weaver auto --recipe output-param` runs the chain, validating each step). A caller that never reads its variable drops the value and the variable. |
+| **Recipe `output-param`** (tracker roadmap) | Turns a pointer parameter the function only writes into a return value. A `void` function returns the value (`get(a, &v);` → `v = get(a);`); a function that returns a status returns a small result record declared next to its prototype (`s = read(&v);` → the record's `status` and `value`). When the value is written on some paths only (an early error return), the record also carries `has_value`, and the caller assigns the value only when it was written. Each call must pass the address of a local variable (or a field of one) whose address is taken nowhere else, or pass on the caller's own pointer parameter from callers that do: converting the callee first then makes the caller a candidate (leaf-first; `weaver auto --recipe output-param` runs the chain, validating each step). A caller that never reads its variable drops the value and the variable. A call in an `if` or `switch` condition (`if (!parse(s, &i))`) is computed in a block just before the statement, when nothing else in the condition can run first. For C89 units (no `__STDC_VERSION__` of 199901 or later) the recipe writes C89: an `int` flag and a small static constructor instead of `_Bool`, compound literals and designated initialisers. |
 | **Your own change** | `weaver patch change.diff --removes P-…` (or **Check my change…** in the interface) opens a transaction for a unified diff you wrote. Hunks are placed by their content, so approximate line numbers are fine. Validation runs the recipe checks: every affected configuration compiles, the configured tests and differential runs pass on both trees, and the ledger keeps a checkpoint for revert. The mechanical re-check differs: every affected unit is analysed before and after the patch and its pointer facts compared with the rules of change impact. It fails when a named pointer still exists or a pinned or implied contract breaks. Every other change (a pointer added, a read-only pointer now written, a new escape) is listed for review before acceptance. |
 | **AI drafts** | A second switch, `ai.drafts`, on top of AI explanations. `weaver draft P-…` (or **Draft a change with AI**) asks the configured model for a patch that removes the pointer. The model receives its own drafting guide (the same for every provider), the evidence slice, and the exact source of the function, its callers and its declarations. If the draft does not apply, Weaver asks once more with the reason, then opens a transaction exactly as for your own change. Nothing is applied until the draft validates and you accept it. |
 | Transactions (tracker §6) | Candidate cards. States: discovered → analyzed → blocked / proposed → validated / provisional / rejected → accepted / skipped → reverted. Patches are bound to source hashes. Revert uses a three-way merge so later unrelated edits survive. |
@@ -51,6 +51,9 @@ can be accepted. The optional LLM explains and recommends; it never edits or val
 | **CI ratchet** | `weaver ratchet` compares the analysis with a committed baseline (`weaver-ratchet.json`) and fails when a file gains pointers, high-risk pointers or violations of the chosen simplification profile, naming each new pointer. `--base origin/main` compares only the files a merge request changed; `--format github` annotates the pull request; `--update` locks in progress (or records a deliberate increase for review). Counts decide, so renames never fail it. Guide: [`docs/ci.md`](docs/ci.md). |
 | **Web interface** | `weaver serve`: load or set up a project, compile, then explore a map of every pointer colored by what it does to its target. Graphs show points-to and call relationships, and a source view has inline marks. Refactors can be proposed, validated and accepted, contracts pinned, and change impact compared. `--scope` shows one subsystem of a large project. `weaver export-ui` records the interface as one read-only HTML page for sharing. |
 | **AI explanations** (tracker §10) | Off by default; switched on per project. Bring your own key: Claude through Anthropic's SDK, or any OpenAI-style Chat Completions server, hosted or local. One explanation guide (Weaver's vocabulary, evidence rules, eight fixed answer sections) is given to every provider, with the same focused evidence slice and read-only evidence tools; answers are checked against it. `weaver ai`, `weaver explain`. |
+
+How ready this is for playtesters and customers, what a first run on an unfamiliar library found,
+and what is left: [`docs/readiness.md`](docs/readiness.md).
 
 Not yet, following the plans' roadmap: the buffer/range, typed-ID and callback recipes; field-sensitive and lock-aware ownership; CBMC equivalence harnesses; and vendor
 adapters (Diab, Green Hills). See
@@ -68,8 +71,8 @@ Requires Python ≥ 3.10. Points-to evidence comes from two analyses that Weaver
 SVF (installed by `[flow]`) and GCC's own interprocedural points-to, which needs GCC with LTO support
 (`gcc-ar` or `ar` with the LTO plugin) and binutils (`nm`). `pip install -e .` alone works too, with
 GCC's analysis only. A production compiler (Clang or GCC-compatible) must be installed. For
-non-Clang profiles you also need a Clang to act as the secondary frontend. The web interface uses
-only the standard library.
+non-Clang profiles you also need a Clang to act as the secondary frontend; Weaver uses the `clang` on
+`PATH` unless the profile names another. The web interface uses only the standard library.
 
 ## Web interface
 
@@ -80,7 +83,8 @@ weaver export-ui -o weaver.html                 # a read-only copy of the interf
 ```
 
 1. **Load**: open a directory that has a `weaver.yaml`, or set one up from the form. Give the build
-   command with `{cc}` where the compiler goes (`make -B CC={cc}`), the production compiler, an
+   command (`make -B`: recording shims named like the compiler come first on `PATH`; or put `{cc}`
+   where the compiler goes, `make -B CC={cc}`), the production compiler, an
    optional analysis Clang, the tests to run (**Detect test commands** finds `make check`, CTest,
    Meson or test scripts), an optional program run to compare, and the concurrency model.
 2. **Compile**: rebuild through recording shims, collect artifacts, check fidelity, build the
@@ -166,8 +170,8 @@ Modifying operations run one at a time.
 
 ```sh
 weaver init                                   # write weaver.yaml; record profiles, target and platform facts
-weaver capture shim --tool cc=/usr/bin/gcc    # generate a recording shim
-make clean && make CC=$PWD/.weaver/capture/shims/cc
+weaver capture shim --tool gcc=/usr/bin/gcc   # a recording shim named like the compiler the build calls
+make clean && PATH=$PWD/.weaver/capture/shims:$PATH make   # the build's own flags are recorded
 weaver capture finalize --out build           # -> build/compile_commands.json, links.json, tools.json
 
 weaver probe                                  # capability matrix for each profile
@@ -237,8 +241,8 @@ programs:                             # images that run together; closed over th
 profiles:
   - id: native-dev
     compile_commands: build/compile_commands.json
-    capture: {command: "make -B CC={cc}", tools: {cc: gcc}}   # lets `refresh --capture` rebuild
-    secondary_frontend: {compiler: clang}       # only when the production compiler is not Clang
+    capture: {command: "make -B", tools: {gcc: gcc}}   # lets `refresh --capture` rebuild (the shim is first on PATH)
+    secondary_frontend: {compiler: clang-18}    # non-Clang compilers only; default: the clang on PATH
     validation:
       build: {run: [make, -C, "{workspace}", BUILD=out], cwd: "{workspace}"}
       tests: [{name: unit, run: "ctest --test-dir out", cwd: "{workspace}"}]   # compared test by test
@@ -349,7 +353,12 @@ The end-to-end tests capture real builds of the fixture with Clang and GCC. They
   the policy that requires it, and a build that cannot be measured;
 - your own change and AI drafts: diffs placed by content, blocked proposals that say why, a change
   that keeps its pointer or breaks a contract, one accepted and reverted with identical output; a
-  draft that does not apply, is retried once and validates; a model that declines to patch.
+  draft that does not apply, is retried once and validates; a model that declines to patch;
+- the onboarding problems a first run on cJSON found: a GCC profile reads the AST with the default
+  Clang (and warns without one), flags a Makefile puts in `CC` are captured, objects of `cc -c`
+  without `-o` link to their sources, macros spelled differently with equal values pass fidelity,
+  probes ignore the project's `-Werror`, calls in `if` conditions convert, and a C89 unit gets C89
+  code that builds under `-std=c89 -pedantic -Werror`.
 
 ## License
 

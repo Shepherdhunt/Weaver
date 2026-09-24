@@ -26,8 +26,12 @@ Weaver runs on local machines for testing.
   project's `.weaver/` directory.
 - Proven on the demo program and on NASA cFS: about 14,000 pointers, and whole-program evaluation in
   about 4 minutes per recipe with under 1 GB of memory (see [`pilots/cfs`](../pilots/cfs/README.md)).
-- Two pointer-removing recipes (`local-alias`, `scalar-input`), validated transactions with revert,
-  change impact, pinned contracts, and a checked task model for multi-task programs.
+- Three pointer-removing recipes (`local-alias`, `scalar-input`, `output-param`), checked patches
+  written by hand or drafted by AI, validated transactions with revert, coverage of the changed
+  lines, change impact, pinned contracts, a CI ratchet, and a checked task model for multi-task
+  programs.
+- A first run on an unfamiliar library (cJSON) found seven onboarding problems, now fixed. What is
+  ready for playtesters and what is not: [`readiness.md`](readiness.md).
 - Not yet a product: there are no accounts or licences, the only installation is from source, users
   install their own compilers and analysis tools, and CLite itself has no specification yet.
 
@@ -80,7 +84,7 @@ Aim: Weaver installs on other machines without help and holds up on repositories
 5. **More pilots.** Three to five codebases of different shapes:
    - bare-metal firmware with a cross compiler;
    - a Linux daemon;
-   - a library;
+   - a library (done: cJSON, see [`readiness.md`](readiness.md));
    - a CMake + Ninja project;
    - a Makefile project with generated code.
 
@@ -221,6 +225,18 @@ Done:
   carry code. gcov read the data through cFS's own CMake build, unchanged.
 - The CI ratchet (`weaver ratchet`): per-file counts of pointers, high-risk pointers and profile
   violations against a committed baseline, with GitHub annotations and a changed-files scope.
+- A first run on cJSON, a library Weaver had never seen ([`readiness.md`](readiness.md)). It found and
+  fixed these problems:
+  - a GCC profile with no AST reader gave an empty inventory, silently;
+  - a Makefile's `CC = gcc -std=c89` was lost in capture;
+  - objects built by `cc -c` without `-o` were not recorded;
+  - `INT_MIN` spelled differently by GCC and Clang blocked every candidate;
+  - probes failed under `-Werror`;
+  - calls in `if` conditions were not converted;
+  - C99 code was generated for a C89 project.
+
+  Afterwards, one `output-param` change validates on the real CMake build with 22 CTest tests, and a
+  hand-written patch does too.
 - AI drafts (`weaver draft`, **Draft a change with AI**, behind `ai.drafts`): the model drafts a patch
   under its own guide. Weaver applies it by content and asks once more if it does not apply, then
   proposes it as a patch transaction under the same checks. Nothing is applied until the draft
@@ -228,7 +244,15 @@ Done:
 
 Next:
 
-1. Several projects per server; `weaver doctor` and the container image.
+1. Before guided playtests (from [`readiness.md`](readiness.md)):
+   - `weaver doctor`;
+   - the container image;
+   - an onboarding guide;
+   - a warning when the validation build differs from the analysed build;
+   - a better `weaver init`;
+   - two more first runs by someone other than the author.
+
+   Then several projects per server.
 2. Widen `output-param` along its measured cFS blockers (146 candidates, 6 eligible). One candidate
    usually fails several preconditions:
    - Callers outside the analysed build (unit tests, other applications, other OS ports) or a

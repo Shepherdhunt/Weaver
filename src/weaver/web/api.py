@@ -610,11 +610,14 @@ def setup_project(
     cfg_path = root / CONFIG_NAME
     if cfg_path.exists():
         raise FileExistsError(f"{cfg_path} already exists")
+    # also under the compiler's own name: a Makefile that runs 'gcc' itself finds the shim first on PATH
+    base = os.path.basename(compiler)
+    tools = {"cc": compiler, **({base: compiler} if base not in ("", "cc") else {})}
     profile: dict[str, Any] = {
         "id": "default",
         "description": f"captured build: {build}",
         "compile_commands": ".weaver/compdb/default/compile_commands.json",
-        "capture": {"command": build, "tools": {"cc": compiler}},
+        "capture": {"command": build, "tools": tools},
         "target": {"architecture": "recorded_architecture"},
         "platform": {"runtime_mode": "recorded_runtime_mode"},
     }
